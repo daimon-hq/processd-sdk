@@ -89,3 +89,14 @@ PYTHONPATH=src python -m pytest -q
 ```
 
 The E2E suite builds and launches `../processd-standalone/target/debug/processd-mcp`.
+
+## Release
+
+Releases are published from GitHub Actions when a tag matching `v*` is pushed.
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag version must match `pyproject.toml`'s project version.
