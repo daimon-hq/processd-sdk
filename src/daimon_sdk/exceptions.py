@@ -23,3 +23,19 @@ class DaimonToolError(DaimonError):
         self.message = message
         self.tool_name = tool_name
         self.payload = payload or {}
+
+
+class DaimonHttpError(DaimonError):
+    """Raised when a SDK-only HTTP endpoint returns a non-success response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.payload = payload or {}

@@ -104,6 +104,16 @@ class GrepResult:
 
 
 @dataclass(slots=True)
+class FileTransferResult:
+    file_path: str
+    bytes_written: int
+    created_parent_directories: bool
+    created: bool
+    updated: bool
+    raw_payload: dict[str, Any]
+
+
+@dataclass(slots=True)
 class ExecResult:
     output: str
     wall_time_seconds: float
@@ -174,6 +184,11 @@ class RuntimeContextResult:
     @property
     def network(self) -> dict[str, Any]:
         value = self.payload.get("network")
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def capabilities(self) -> dict[str, Any]:
+        value = self.payload.get("capabilities")
         return value if isinstance(value, dict) else {}
 
 

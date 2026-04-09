@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from daimon_sdk import DaimonToolError
+from daimon_sdk import DaimonHttpError, DaimonToolError
 
 
 class _QuietHTTPServer(HTTPServer):
@@ -66,12 +66,28 @@ async def test_files_roundtrip_and_search(client, tmp_path: Path) -> None:
     assert grep.num_files >= 1
     assert grep.content is not None
 
+    uploaded = await client.files.upload_bytes(str(tmp_path / "binary" / "blob.bin"), b"\x00\x01\x02")
+    assert uploaded.bytes_written == 3
+    assert uploaded.created_parent_directories
+
+    downloaded = await client.files.download_bytes(str(tmp_path / "binary" / "blob.bin"))
+    assert downloaded == b"\x00\x01\x02"
+
+    local_copy = await client.files.download_file(
+        str(tmp_path / "binary" / "blob.bin"),
+        tmp_path / "downloaded" / "copy.bin",
+    )
+    assert local_copy.read_bytes() == b"\x00\x01\x02"
+
 
 @pytest.mark.asyncio
 async def test_read_and_write_errors_raise_daimon_tool_error(client, tmp_path: Path) -> None:
     missing = tmp_path / "missing.txt"
     with pytest.raises(DaimonToolError):
         await client.files.read(str(missing))
+    with pytest.raises(DaimonHttpError) as exc_info:
+        await client.files.download_bytes(str(missing))
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio

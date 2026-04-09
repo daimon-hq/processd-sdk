@@ -8,7 +8,12 @@ import httpx
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 
-from .exceptions import DaimonConnectionError, DaimonProtocolError, DaimonToolError
+from .exceptions import (
+    DaimonConnectionError,
+    DaimonHttpError,
+    DaimonProtocolError,
+    DaimonToolError,
+)
 
 
 @dataclass(slots=True)
@@ -129,8 +134,49 @@ class FastMCPTransportAdapter:
             raw_result=result,
         )
 
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        content: bytes | None = None,
+    ) -> httpx.Response:
+        headers = {"X-Access-Token": self.access_token} if self.access_token else None
+        async with self._httpx_client_factory(headers=headers) as client:
+            url = f"{self._service_base_url()}{path}"
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    content=content,
+                )
+            except Exception as exc:  # pragma: no cover - transport failures vary
+                raise DaimonConnectionError(str(exc)) from exc
+        if response.status_code >= 400:
+            payload: dict[str, Any] = {}
+            try:
+                raw_payload = response.json()
+                if isinstance(raw_payload, dict):
+                    payload = dict(raw_payload)
+            except Exception:
+                payload = {}
+            message = payload.get("error")
+            if not isinstance(message, str) or not message:
+                message = response.text or f"http {response.status_code}"
+            raise DaimonHttpError(
+                message,
+                status_code=response.status_code,
+                payload=payload,
+            )
+        return response
+
     def _httpx_client_factory(self, **kwargs: Any) -> httpx.AsyncClient:
         headers = dict(kwargs.pop("headers", {}) or {})
         kwargs.setdefault("timeout", self.timeout_s)
         kwargs.setdefault("follow_redirects", True)
         return httpx.AsyncClient(headers=headers, **kwargs)
+
+    def _service_base_url(self) -> str:
+        return self.base_url.removesuffix("/mcp")

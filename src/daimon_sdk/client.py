@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from ._transport import FastMCPTransportAdapter, ToolCallEnvelope
@@ -8,6 +9,7 @@ from .models import (
     ContentBlock,
     EditResult,
     ExecResult,
+    FileTransferResult,
     GlobResult,
     GrepResult,
     ReadImageFile,
@@ -225,6 +227,41 @@ class FilesAPI:
             applied_offset=payload.get("appliedOffset"),
             raw_payload=payload,
         )
+
+    async def upload_bytes(self, file_path: str, data: bytes) -> FileTransferResult:
+        response = await self._client._transport.request(
+            "PUT",
+            "/sdk/file",
+            params={"path": file_path},
+            content=data,
+        )
+        payload = response.json()
+        return FileTransferResult(
+            file_path=payload["filePath"],
+            bytes_written=payload["bytesWritten"],
+            created_parent_directories=payload["createdParentDirectories"],
+            created=payload["created"],
+            updated=payload["updated"],
+            raw_payload=payload,
+        )
+
+    async def download_bytes(self, file_path: str) -> bytes:
+        response = await self._client._transport.request(
+            "GET",
+            "/sdk/file",
+            params={"path": file_path},
+        )
+        return response.content
+
+    async def upload_file(self, local_path: str | Path, remote_path: str) -> FileTransferResult:
+        local_path = Path(local_path)
+        return await self.upload_bytes(remote_path, local_path.read_bytes())
+
+    async def download_file(self, remote_path: str, local_path: str | Path) -> Path:
+        local_path = Path(local_path)
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        local_path.write_bytes(await self.download_bytes(remote_path))
+        return local_path
 
 
 class ExecAPI:
