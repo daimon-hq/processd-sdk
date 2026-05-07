@@ -99,6 +99,7 @@ print(read.file.content)
 - `await manager.health()`
 - `await manager.capacity()`
 - `await manager.create_sandbox()`
+- `await manager.find_or_create_sandbox(labels={"thread_id": thread_id})`
 - `await manager.get_sandbox(id)`
 - `await manager.start_sandbox(id) / stop_sandbox(id) / delete_sandbox(id)`
 - `async with manager.sandbox() as sandbox`
@@ -137,8 +138,8 @@ PROCESSD_SDK_MANAGER_E2E=1 PYTHONPATH=src python -m pytest -q -m manager_e2e
 Releases are published from GitHub Actions when a tag matching `v*` is pushed.
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The tag version must match `pyproject.toml`'s project version.

@@ -37,6 +37,10 @@ SANDBOX_PAYLOAD = {
     "token": "pdm-token",
     "workspace": "/tmp/processd-manager/workspaces/sandbox-1/workspace",
     "created_at": 123,
+    "labels": {"thread_id": "thread-a"},
+    "last_used_at": 124,
+    "ttl_seconds": 3600,
+    "expires_at": 3724,
     "limits": {
         "rlimit": "applied",
         "cgroup": "applied",
@@ -134,6 +138,9 @@ def test_manager_models_parse_payloads() -> None:
     sandbox = SandboxInfo.from_dict(SANDBOX_PAYLOAD)
     assert sandbox.id == "sandbox-1"
     assert sandbox.limits.rlimit == "applied"
+    assert sandbox.labels["thread_id"] == "thread-a"
+    assert sandbox.ttl_seconds == 3600
+    assert sandbox.expires_at == 3724
     assert sandbox.raw_payload["mcp_url"] == SANDBOX_PAYLOAD["mcp_url"]
 
     capacity = ManagerCapacityResult.from_dict(CAPACITY_PAYLOAD)

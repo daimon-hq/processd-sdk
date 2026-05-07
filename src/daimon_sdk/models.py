@@ -140,6 +140,10 @@ class SandboxInfo:
     workspace: str
     created_at: int
     limits: LimitsStatus
+    labels: dict[str, str]
+    last_used_at: int
+    ttl_seconds: int | None
+    expires_at: int | None
     raw_payload: dict[str, Any]
 
     @classmethod
@@ -152,6 +156,10 @@ class SandboxInfo:
             workspace=str(payload["workspace"]),
             created_at=int(payload["created_at"]),
             limits=LimitsStatus.from_dict(payload.get("limits")),
+            labels={str(k): str(v) for k, v in dict(payload.get("labels") or {}).items()},
+            last_used_at=int(payload.get("last_used_at") or payload["created_at"]),
+            ttl_seconds=_int_or_none(payload.get("ttl_seconds")),
+            expires_at=_int_or_none(payload.get("expires_at")),
             raw_payload=dict(payload),
         )
 

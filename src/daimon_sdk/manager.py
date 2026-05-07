@@ -22,6 +22,7 @@ class ManagerHTTPTransport:
         *,
         params: dict[str, Any] | None = None,
         content: bytes | None = None,
+        json: dict[str, Any] | None = None,
     ) -> httpx.Response:
         headers = {"X-Access-Token": self.access_token} if self.access_token else None
         async with httpx.AsyncClient(
@@ -35,6 +36,7 @@ class ManagerHTTPTransport:
                     f"{self.base_url}{path}",
                     params=params,
                     content=content,
+                    json=json,
                 )
             except Exception as exc:  # pragma: no cover - transport failures vary
                 raise DaimonConnectionError(str(exc)) from exc
@@ -56,8 +58,14 @@ class ManagerHTTPTransport:
             )
         return response
 
-    async def json(self, method: str, path: str) -> dict[str, Any]:
-        response = await self.request(method, path)
+    async def json(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        response = await self.request(method, path, json=body)
         payload = response.json()
         if not isinstance(payload, dict):
             raise DaimonConnectionError(f"manager response was not a JSON object: {payload!r}")
@@ -141,6 +149,10 @@ class DaimonSandbox:
             workspace=self.info.workspace,
             created_at=self.info.created_at,
             limits=self.info.limits,
+            labels=self.info.labels,
+            last_used_at=self.info.last_used_at,
+            ttl_seconds=self.info.ttl_seconds,
+            expires_at=self.info.expires_at,
             raw_payload=self.info.raw_payload,
         )
 
@@ -209,6 +221,20 @@ class DaimonManagerClient:
 
     async def create_sandbox(self) -> DaimonSandbox:
         info = SandboxInfo.from_dict(await self._transport.json("POST", "/sandboxes"))
+        return DaimonSandbox(self, info, timeout_s=self.timeout_s)
+
+    async def find_or_create_sandbox(
+        self,
+        *,
+        labels: dict[str, str],
+        ttl_seconds: int | None = None,
+    ) -> DaimonSandbox:
+        body: dict[str, Any] = {"labels": labels}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        info = SandboxInfo.from_dict(
+            await self._transport.json("POST", "/sandboxes/find-or-create", body=body)
+        )
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
 
     async def get_sandbox(self, sandbox_id: str) -> SandboxInfo:
