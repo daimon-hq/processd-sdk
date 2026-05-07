@@ -6,7 +6,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from daimon_sdk._transport import decode_tool_result
+from daimon_sdk import DaimonClient
+from daimon_sdk._transport import ToolCallEnvelope, content_blocks_display_text, decode_tool_result
 from daimon_sdk.exceptions import DaimonHttpError, DaimonProtocolError
 from daimon_sdk.manager import DaimonSandbox, ManagerHTTPTransport
 from daimon_sdk.models import (
@@ -129,9 +130,47 @@ def test_decode_tool_result_prefers_structured_content() -> None:
     assert content[0]["type"] == "text"
 
 
+def test_content_blocks_display_text_joins_text_blocks() -> None:
+    assert (
+        content_blocks_display_text(
+            [
+                {"type": "text", "text": "first"},
+                {"type": "image", "data": "..."},
+                {"type": "text", "text": "second"},
+            ]
+        )
+        == "first\nsecond"
+    )
+
+
 def test_decode_tool_result_raises_for_invalid_text_json() -> None:
     with pytest.raises(DaimonProtocolError):
         decode_tool_result(DummyResult(content=[DummyText("not-json")]))
+
+
+@pytest.mark.asyncio
+async def test_typed_tool_results_include_display_text() -> None:
+    client = DaimonClient("http://127.0.0.1:19000/mcp")
+
+    async def fake_call_tool(name: str, arguments: dict, *, raise_on_error: bool = True):
+        assert name == "Write"
+        return ToolCallEnvelope(
+            tool_name=name,
+            payload={
+                "type": "create",
+                "filePath": "/workspace/a.txt",
+                "content": "hello\n",
+                "structuredPatch": [],
+            },
+            content_blocks=[{"type": "text", "text": "Created file /workspace/a.txt"}],
+            display_text="Created file /workspace/a.txt",
+            raw_result=None,
+        )
+
+    client._call_tool = fake_call_tool  # type: ignore[method-assign]
+    written = await client.files.write("/workspace/a.txt", "hello\n")
+    assert written.display_text == "Created file /workspace/a.txt"
+    assert written.content_blocks[0].text == "Created file /workspace/a.txt"
 
 
 def test_manager_models_parse_payloads() -> None:

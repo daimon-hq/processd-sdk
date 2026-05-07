@@ -54,6 +54,8 @@ class ReadResult:
     file: ReadTextFile | ReadImageFile | ReadPartsFile
     extra_content: list[ContentBlock]
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
 
 @dataclass(slots=True)
@@ -67,6 +69,8 @@ class EditResult:
     replace_all: bool
     git_diff: dict[str, Any] | None
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
 
 @dataclass(slots=True)
@@ -78,6 +82,8 @@ class WriteResult:
     original_file: str | None
     git_diff: dict[str, Any] | None
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
 
 @dataclass(slots=True)
@@ -88,6 +94,8 @@ class GlobResult:
     truncated: bool
     duration_ms: int
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
 
 @dataclass(slots=True)
@@ -101,6 +109,8 @@ class GrepResult:
     applied_limit: int | None
     applied_offset: int | None
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
 
 @dataclass(slots=True)
@@ -231,6 +241,8 @@ class ExecResult:
     session_id: int | None
     exit_code: int | None
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
     @property
     def is_running(self) -> bool:
@@ -251,6 +263,8 @@ class BashResult:
     persisted_output_size: int | None
     background_task_id: str | None
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
     @property
     def is_background(self) -> bool:
@@ -270,11 +284,15 @@ class WebFetchResult:
     persisted_size: int | None
     duration_ms: int
     raw_payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
 
 @dataclass(slots=True)
 class RuntimeContextResult:
     payload: dict[str, Any]
+    content_blocks: list[ContentBlock] = field(default_factory=list)
+    display_text: str = ""
 
     @property
     def base_workdir(self) -> str | None:

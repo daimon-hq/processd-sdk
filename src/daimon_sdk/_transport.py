@@ -21,6 +21,7 @@ class ToolCallEnvelope:
     tool_name: str
     payload: dict[str, Any]
     content_blocks: list[dict[str, Any]]
+    display_text: str
     raw_result: Any
 
 
@@ -43,6 +44,14 @@ def _content_block_to_dict(block: Any) -> dict[str, Any]:
             if not key.startswith("_")
         }
     return data
+
+
+def content_blocks_display_text(blocks: list[dict[str, Any]]) -> str:
+    return "\n".join(
+        str(block["text"])
+        for block in blocks
+        if block.get("type") == "text" and isinstance(block.get("text"), str)
+    )
 
 
 def decode_tool_result(result: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -131,6 +140,7 @@ class FastMCPTransportAdapter:
             tool_name=tool_name,
             payload=payload,
             content_blocks=content_blocks,
+            display_text=content_blocks_display_text(content_blocks),
             raw_result=result,
         )
 

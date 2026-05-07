@@ -62,7 +62,11 @@ class RuntimeAPI:
 
     async def get_context(self) -> RuntimeContextResult:
         envelope = await self._client._call_tool("GetRuntimeContext", {})
-        return RuntimeContextResult(payload=envelope.payload)
+        return RuntimeContextResult(
+            payload=envelope.payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
+        )
 
 
 class FilesAPI:
@@ -114,6 +118,8 @@ class FilesAPI:
             file=file_model,
             extra_content=_content_blocks(envelope),
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
     async def edit(
@@ -144,6 +150,8 @@ class FilesAPI:
             replace_all=payload["replaceAll"],
             git_diff=payload.get("gitDiff"),
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
     async def write(self, file_path: str, content: str) -> WriteResult:
@@ -160,6 +168,8 @@ class FilesAPI:
             original_file=payload.get("originalFile"),
             git_diff=payload.get("gitDiff"),
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
     async def glob(self, pattern: str, *, path: str | None = None) -> GlobResult:
@@ -175,6 +185,8 @@ class FilesAPI:
             truncated=payload["truncated"],
             duration_ms=payload["durationMs"],
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
     async def grep(
@@ -226,6 +238,8 @@ class FilesAPI:
             applied_limit=payload.get("appliedLimit"),
             applied_offset=payload.get("appliedOffset"),
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
     async def upload_bytes(self, file_path: str, data: bytes) -> FileTransferResult:
@@ -297,6 +311,8 @@ class ExecAPI:
             persisted_output_size=payload.get("persistedOutputSize"),
             background_task_id=payload.get("backgroundTaskId"),
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
     async def exec_command(
@@ -328,7 +344,7 @@ class ExecAPI:
             if value is not None:
                 arguments[key] = value
         envelope = await self._client._call_tool("exec_command", arguments)
-        return self._exec_from_payload(envelope.payload)
+        return self._exec_from_envelope(envelope)
 
     async def start_session(
         self,
@@ -374,7 +390,7 @@ class ExecAPI:
         if max_output_tokens is not None:
             arguments["max_output_tokens"] = max_output_tokens
         envelope = await self._client._call_tool("write_stdin", arguments)
-        return self._exec_from_payload(envelope.payload)
+        return self._exec_from_envelope(envelope)
 
     @staticmethod
     def _exec_from_payload(payload: dict[str, Any]) -> ExecResult:
@@ -386,6 +402,20 @@ class ExecAPI:
             session_id=_int_or_none(payload.get("session_id")),
             exit_code=_int_or_none(payload.get("exit_code")),
             raw_payload=payload,
+        )
+
+    @staticmethod
+    def _exec_from_envelope(envelope: ToolCallEnvelope) -> ExecResult:
+        return ExecResult(
+            output=envelope.payload.get("output", ""),
+            wall_time_seconds=float(envelope.payload.get("wall_time_seconds", 0.0)),
+            chunk_id=str(envelope.payload.get("chunk_id", "")),
+            original_token_count=int(envelope.payload.get("original_token_count", 0)),
+            session_id=_int_or_none(envelope.payload.get("session_id")),
+            exit_code=_int_or_none(envelope.payload.get("exit_code")),
+            raw_payload=envelope.payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
 
@@ -422,6 +452,8 @@ class WebAPI:
             persisted_size=payload.get("persistedSize"),
             duration_ms=payload["durationMs"],
             raw_payload=payload,
+            content_blocks=_content_blocks(envelope),
+            display_text=envelope.display_text,
         )
 
 
