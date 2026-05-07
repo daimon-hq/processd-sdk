@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+import httpx
 import pytest
 
-from daimon_sdk import DaimonHttpError, DaimonToolError
+from daimon_sdk import DaimonHttpError, DaimonManagerClient, DaimonToolError
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PROCESSD_ROOT = REPO_ROOT.parent / "processd-standalone"
+MANAGER_E2E_ENABLED = os.environ.get("PROCESSD_SDK_MANAGER_E2E") == "1"
 
 
 class _QuietHTTPServer(HTTPServer):
@@ -30,6 +39,75 @@ class _WebFetchHandler(BaseHTTPRequestHandler):
             return
         self.send_response(404)
         self.end_headers()
+
+
+def _wait_for_http(url: str, timeout: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.get(url, timeout=0.5)
+            if response.status_code in (200, 204):
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.2)
+    raise RuntimeError(f"timed out waiting for {url}")
+
+
+def _compose_down() -> None:
+    subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(PROCESSD_ROOT / "compose.manager.yaml"),
+            "-f",
+            str(PROCESSD_ROOT / "compose.manager.cgroup.yaml"),
+            "down",
+            "--remove-orphans",
+        ],
+        cwd=PROCESSD_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+
+
+def _manager_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PROCESSD_MANAGER_CGROUP_MEMORY_MAX_BYTES", "536870912")
+    env.setdefault("PROCESSD_MANAGER_CGROUP_SWAP_MAX_BYTES", "0")
+    env.setdefault("PROCESSD_MANAGER_CGROUP_PIDS_MAX", "128")
+    env.setdefault("PROCESSD_MANAGER_CGROUP_CPU_MS_PER_SEC", "500")
+    if extra:
+        env.update(extra)
+    return env
+
+
+@contextmanager
+def _start_docker_manager(*, extra_env: dict[str, str] | None = None) -> Iterator[str]:
+    assert PROCESSD_ROOT.exists(), f"missing sibling processd-standalone at {PROCESSD_ROOT}"
+    _compose_down()
+    subprocess.run(
+        ["make", "docker-up-manager-best-effort"],
+        cwd=PROCESSD_ROOT,
+        env=_manager_env(extra_env),
+        check=True,
+        text=True,
+    )
+    manager_url = "http://127.0.0.1:18080"
+    _wait_for_http(f"{manager_url}/health")
+    try:
+        yield manager_url
+    finally:
+        _compose_down()
+
+
+@pytest.fixture
+def docker_manager_url() -> Iterator[str]:
+    with _start_docker_manager() as manager_url:
+        yield manager_url
 
 
 @pytest.mark.asyncio
@@ -143,3 +221,82 @@ async def test_background_bash_and_auth(auth_client) -> None:
         await asyncio.sleep(0.1)
     assert final_text is not None
     assert "start" in final_text
+
+
+@pytest.mark.manager_e2e
+@pytest.mark.skipif(
+    not MANAGER_E2E_ENABLED,
+    reason="set PROCESSD_SDK_MANAGER_E2E=1 to run Docker manager SDK E2E",
+)
+@pytest.mark.asyncio
+async def test_docker_manager_lifecycle_and_sandbox_mcp(docker_manager_url: str) -> None:
+    async with DaimonManagerClient(docker_manager_url) as manager:
+        assert await manager.health()
+        capacity = await manager.capacity()
+        assert capacity.mode == "resource"
+        assert capacity.memory_bytes.capacity is not None
+        assert capacity.pids.capacity is not None
+        assert capacity.cpu_ms_per_sec.capacity is not None
+
+        sandbox = await manager.create_sandbox()
+        try:
+            assert sandbox.info.state == "running"
+            await sandbox.connect()
+            context = await sandbox.runtime.get_context()
+            assert context.base_workdir == "/workspace"
+            result = await sandbox.exec.bash("echo hello")
+            assert result.stdout == "hello\n"
+
+            stopped = await sandbox.stop()
+            assert stopped.state == "stopped"
+            with pytest.raises(Exception):
+                _wait_for_http(sandbox.info.mcp_url.replace("/mcp", "/health"), timeout=1)
+
+            restarted = await sandbox.start()
+            assert restarted.state == "running"
+            _wait_for_http(sandbox.info.mcp_url.replace("/mcp", "/health"), timeout=10)
+        finally:
+            await sandbox.delete()
+
+        with pytest.raises(DaimonHttpError) as exc_info:
+            await manager.get_sandbox(sandbox.id)
+        assert exc_info.value.status_code == 404
+
+
+@pytest.mark.manager_e2e
+@pytest.mark.skipif(
+    not MANAGER_E2E_ENABLED,
+    reason="set PROCESSD_SDK_MANAGER_E2E=1 to run Docker manager SDK E2E",
+)
+@pytest.mark.asyncio
+async def test_docker_manager_context_manager_deletes_sandbox(docker_manager_url: str) -> None:
+    async with DaimonManagerClient(docker_manager_url) as manager:
+        async with manager.sandbox() as sandbox:
+            sandbox_id = sandbox.id
+            result = await sandbox.exec.bash("pwd")
+            assert result.stdout.strip() == "/workspace"
+
+        with pytest.raises(DaimonHttpError) as exc_info:
+            await manager.get_sandbox(sandbox_id)
+        assert exc_info.value.status_code == 404
+
+
+@pytest.mark.manager_e2e
+@pytest.mark.skipif(
+    not MANAGER_E2E_ENABLED,
+    reason="set PROCESSD_SDK_MANAGER_E2E=1 to run Docker manager SDK E2E",
+)
+@pytest.mark.asyncio
+async def test_docker_manager_admission_429_payload_is_preserved() -> None:
+    with _start_docker_manager(
+        extra_env={
+            "PROCESSD_MANAGER_SANDBOX_REQUEST_MEMORY_BYTES": str(1 << 62),
+            "PROCESSD_MANAGER_SANDBOX_REQUEST_PIDS": "0",
+            "PROCESSD_MANAGER_SANDBOX_REQUEST_CPU_MS_PER_SEC": "0",
+        }
+    ) as manager_url:
+        async with DaimonManagerClient(manager_url) as manager:
+            with pytest.raises(DaimonHttpError) as exc_info:
+                await manager.create_sandbox()
+            assert exc_info.value.status_code == 429
+            assert exc_info.value.payload["admission"]["missing"][0]["resource"] == "memory_bytes"

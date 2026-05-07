@@ -1,10 +1,11 @@
 # daimon-sdk
 
-Typed async Python SDK for `processd-mcp`.
+Typed async Python SDK for `processd-mcp` and `processd-sandbox-manager`.
 
 `daimon-sdk` wraps the raw MCP tool surface exposed by `processd-mcp` and presents it as grouped Python APIs such as `client.files.read()` and `client.exec.start_session()`. The SDK keeps `processd-standalone` as the contract source of truth and focuses on:
 
 - connection and token wiring
+- manager sandbox lifecycle helpers
 - typed request/response handling
 - structured tool error mapping
 - interactive session helpers
@@ -23,6 +24,29 @@ pip install -e ".[dev]"
 ```
 
 ## Quickstart
+
+With a sandbox manager:
+
+```python
+import asyncio
+
+from daimon_sdk import DaimonManagerClient
+
+
+async def main() -> None:
+    async with DaimonManagerClient("http://127.0.0.1:18080") as manager:
+        async with manager.sandbox() as sandbox:
+            runtime = await sandbox.runtime.get_context()
+            print(runtime.base_workdir)
+
+            result = await sandbox.exec.bash("python3 --version")
+            print(result.stdout or result.stderr)
+
+
+asyncio.run(main())
+```
+
+If you already have a sandbox MCP URL and token, connect directly to MCP:
 
 ```python
 import asyncio
@@ -71,6 +95,18 @@ print(read.file.content)
 - `SessionHandle.write() / poll() / wait_for_exit() / close()`
 - `client.web.fetch()`
 - `client.raw.call_tool()`
+- `DaimonManagerClient(base_url, access_token=None, timeout_s=30.0)`
+- `await manager.health()`
+- `await manager.capacity()`
+- `await manager.create_sandbox()`
+- `await manager.get_sandbox(id)`
+- `await manager.start_sandbox(id) / stop_sandbox(id) / delete_sandbox(id)`
+- `async with manager.sandbox() as sandbox`
+- `sandbox.runtime/files/exec/web/raw`
+
+`manager.sandbox()` creates a sandbox, connects to its MCP endpoint, and deletes
+it on context exit by default. Use `delete_on_exit=False` or
+`create_sandbox()` when the workspace should survive beyond the context.
 
 ## Local Testing
 
@@ -90,13 +126,19 @@ PYTHONPATH=src python -m pytest -q
 
 The E2E suite builds and launches `../processd-standalone/target/debug/processd-mcp`.
 
+Manager E2E uses the sibling `processd-standalone` Docker manager compose path:
+
+```bash
+PROCESSD_SDK_MANAGER_E2E=1 PYTHONPATH=src python -m pytest -q -m manager_e2e
+```
+
 ## Release
 
 Releases are published from GitHub Actions when a tag matching `v*` is pushed.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The tag version must match `pyproject.toml`'s project version.

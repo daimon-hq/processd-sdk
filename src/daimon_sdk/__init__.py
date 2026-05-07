@@ -6,14 +6,19 @@ from .exceptions import (
     DaimonProtocolError,
     DaimonToolError,
 )
+from .manager import DaimonManagerClient, DaimonSandbox
 from .models import (
     BashResult,
+    CapacityResource,
     EditResult,
     ExecResult,
     FileTransferResult,
     GlobResult,
     GrepResult,
+    LimitsStatus,
+    ManagerCapacityResult,
     RuntimeContextResult,
+    SandboxInfo,
     SessionHandle,
     WebFetchResult,
     WriteResult,
@@ -21,6 +26,7 @@ from .models import (
 
 __all__ = [
     "BashResult",
+    "CapacityResource",
     "EditResult",
     "ExecResult",
     "FileTransferResult",
@@ -30,9 +36,14 @@ __all__ = [
     "DaimonConnectionError",
     "DaimonError",
     "DaimonHttpError",
+    "DaimonManagerClient",
     "DaimonProtocolError",
+    "DaimonSandbox",
     "DaimonToolError",
+    "LimitsStatus",
+    "ManagerCapacityResult",
     "RuntimeContextResult",
+    "SandboxInfo",
     "SessionHandle",
     "WebFetchResult",
     "WriteResult",

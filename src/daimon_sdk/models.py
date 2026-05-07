@@ -114,6 +114,107 @@ class FileTransferResult:
 
 
 @dataclass(slots=True)
+class LimitsStatus:
+    rlimit: str
+    cgroup: str
+    cgroup_reason: str | None
+    raw_payload: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "LimitsStatus":
+        payload = dict(payload or {})
+        return cls(
+            rlimit=str(payload.get("rlimit", "off")),
+            cgroup=str(payload.get("cgroup", "off")),
+            cgroup_reason=payload.get("cgroup_reason"),
+            raw_payload=payload,
+        )
+
+
+@dataclass(slots=True)
+class SandboxInfo:
+    id: str
+    state: str
+    mcp_url: str
+    token: str
+    workspace: str
+    created_at: int
+    limits: LimitsStatus
+    raw_payload: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SandboxInfo":
+        return cls(
+            id=str(payload["id"]),
+            state=str(payload["state"]),
+            mcp_url=str(payload["mcp_url"]),
+            token=str(payload["token"]),
+            workspace=str(payload["workspace"]),
+            created_at=int(payload["created_at"]),
+            limits=LimitsStatus.from_dict(payload.get("limits")),
+            raw_payload=dict(payload),
+        )
+
+
+@dataclass(slots=True)
+class CapacityResource:
+    capacity: int | None
+    reserve: int
+    used: int
+    available: int | None
+    sandbox_request: int
+    raw_payload: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CapacityResource":
+        return cls(
+            capacity=_int_or_none(payload.get("capacity")),
+            reserve=int(payload.get("reserve", 0)),
+            used=int(payload.get("used", 0)),
+            available=_int_or_none(payload.get("available")),
+            sandbox_request=int(payload.get("sandbox_request", 0)),
+            raw_payload=dict(payload),
+        )
+
+
+@dataclass(slots=True)
+class ManagerCapacityResult:
+    mode: str
+    capacity_source: str
+    running_sandboxes: int
+    creating_sandboxes: int
+    memory_bytes: CapacityResource
+    pids: CapacityResource
+    cpu_ms_per_sec: CapacityResource
+    raw_payload: dict[str, Any]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ManagerCapacityResult":
+        return cls(
+            mode=str(payload["mode"]),
+            capacity_source=str(payload.get("capacity_source", "")),
+            running_sandboxes=int(payload.get("running_sandboxes", 0)),
+            creating_sandboxes=int(payload.get("creating_sandboxes", 0)),
+            memory_bytes=CapacityResource.from_dict(payload.get("memory_bytes") or {}),
+            pids=CapacityResource.from_dict(payload.get("pids") or {}),
+            cpu_ms_per_sec=CapacityResource.from_dict(payload.get("cpu_ms_per_sec") or {}),
+            raw_payload=dict(payload),
+        )
+
+
+def _int_or_none(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
+
+
+@dataclass(slots=True)
 class ExecResult:
     output: str
     wall_time_seconds: float

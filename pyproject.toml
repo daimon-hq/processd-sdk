@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "daimon-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Typed async Python SDK for daimon MCP services."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,3 +30,6 @@ packages = ["src/daimon_sdk"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+markers = [
+  "manager_e2e: Docker processd-sandbox-manager SDK E2E coverage",
+]
