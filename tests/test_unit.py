@@ -253,6 +253,13 @@ async def test_daimon_sandbox_lifecycle_updates_info_and_closes_client() -> None
         async def delete_sandbox(self, sandbox_id: str) -> None:
             self.deleted = sandbox_id
 
+        async def update_sandbox(self, sandbox_id: str, *, ttl_seconds: int | None = None, **updates) -> SandboxInfo:
+            payload = dict(SANDBOX_PAYLOAD)
+            payload["id"] = sandbox_id
+            payload["ttl_seconds"] = ttl_seconds
+            payload["expires_at"] = payload["last_used_at"] + ttl_seconds if ttl_seconds is not None else payload["expires_at"]
+            return SandboxInfo.from_dict(payload)
+
     manager = DummyManager()
     sandbox = DaimonSandbox(manager, SandboxInfo.from_dict(SANDBOX_PAYLOAD), timeout_s=30)
     first_client = DummyClient()
@@ -272,6 +279,34 @@ async def test_daimon_sandbox_lifecycle_updates_info_and_closes_client() -> None
     assert manager.deleted == "sandbox-1"
     assert replacement_client.closed == 1
     assert sandbox.info.state == "deleted"
+
+    updated = await sandbox.set_ttl(0)
+    assert updated.ttl_seconds == 0
+    assert sandbox.info.ttl_seconds == 0
+
+
+@pytest.mark.asyncio
+async def test_manager_update_sandbox_omits_none_fields(monkeypatch) -> None:
+    from daimon_sdk.manager import DaimonManagerClient
+
+    captured: dict[str, object] = {}
+
+    async def fake_json(method: str, path: str, *, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return dict(SANDBOX_PAYLOAD)
+
+    manager = DaimonManagerClient("http://127.0.0.1:18080")
+    monkeypatch.setattr(manager._transport, "json", fake_json)
+
+    await manager.update_sandbox("sandbox-1", ttl_seconds=0, note=None)
+
+    assert captured == {
+        "method": "PATCH",
+        "path": "/sandboxes/sandbox-1",
+        "body": {"ttl_seconds": 0},
+    }
 
 
 @pytest.mark.asyncio

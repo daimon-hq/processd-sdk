@@ -102,12 +102,16 @@ print(read.file.content)
 - `await manager.find_or_create_sandbox(labels={"thread_id": thread_id})`
 - `await manager.get_sandbox(id)`
 - `await manager.start_sandbox(id) / stop_sandbox(id) / delete_sandbox(id)`
+- `await manager.update_sandbox(id, ttl_seconds=...)`
 - `async with manager.sandbox() as sandbox`
+- `await sandbox.set_ttl(ttl_seconds)`
 - `sandbox.runtime/files/exec/web/raw`
 
 `manager.sandbox()` creates a sandbox, connects to its MCP endpoint, and deletes
 it on context exit by default. Use `delete_on_exit=False` or
 `create_sandbox()` when the workspace should survive beyond the context.
+`ttl_seconds=0` marks a sandbox as immediately expired so the next manager
+reaper loop deletes it.
 
 ## Local Testing
 

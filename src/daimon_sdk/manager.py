@@ -119,7 +119,7 @@ class DaimonSandbox:
     async def close(self) -> None:
         await self.client.close()
 
-    async def set_ttl(self, ttl_seconds: int | None) -> SandboxInfo:
+    async def set_ttl(self, ttl_seconds: int) -> SandboxInfo:
         self.info = await self._manager.update_sandbox(self.id, ttl_seconds=ttl_seconds)
         return self.info
 
@@ -257,9 +257,18 @@ class DaimonManagerClient:
     async def delete_sandbox(self, sandbox_id: str) -> None:
         await self._transport.request("DELETE", f"/sandboxes/{sandbox_id}")
 
-    async def update_sandbox(self, sandbox_id: str, **updates: Any) -> SandboxInfo:
+    async def update_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        ttl_seconds: int | None = None,
+        **updates: Any,
+    ) -> SandboxInfo:
+        body = {key: value for key, value in updates.items() if value is not None}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
         return SandboxInfo.from_dict(
-            await self._transport.json("PATCH", f"/sandboxes/{sandbox_id}", body=updates)
+            await self._transport.json("PATCH", f"/sandboxes/{sandbox_id}", body=body or None)
         )
 
     def sandbox(self, *, delete_on_exit: bool = True) -> SandboxContext:

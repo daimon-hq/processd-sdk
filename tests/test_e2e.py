@@ -13,7 +13,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from daimon_sdk import DaimonHttpError, DaimonManagerClient, DaimonToolError
+from daimon_sdk import DaimonConnectionError, DaimonHttpError, DaimonManagerClient, DaimonToolError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROCESSD_ROOT = REPO_ROOT.parent / "processd-standalone"
@@ -219,8 +219,35 @@ async def test_background_bash_and_auth(auth_client) -> None:
         if "[process exited with code 0]" in final_text:
             break
         await asyncio.sleep(0.1)
+
     assert final_text is not None
     assert "start" in final_text
+    assert "end" in final_text
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not MANAGER_E2E_ENABLED, reason="set PROCESSD_SDK_MANAGER_E2E=1")
+async def test_docker_manager_ttl_zero_expires_on_next_reaper_loop() -> None:
+    with _start_docker_manager(
+        extra_env={"PROCESSD_MANAGER_REAPER_INTERVAL_SECONDS": "1"}
+    ) as manager_url:
+        async with DaimonManagerClient(manager_url) as manager:
+            sandbox = await manager.create_sandbox()
+            updated = await sandbox.set_ttl(0)
+            assert updated.ttl_seconds == 0
+
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    await manager.get_sandbox(sandbox.id)
+                except DaimonHttpError as exc:
+                    assert exc.status_code == 404
+                    break
+                except DaimonConnectionError:
+                    pass
+                await asyncio.sleep(1)
+            else:
+                raise AssertionError("sandbox was not reaped after ttl_seconds=0")
 
 
 @pytest.mark.manager_e2e
