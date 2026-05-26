@@ -99,6 +99,7 @@ print(read.file.content)
 - `await manager.health()`
 - `await manager.capacity()`
 - `await manager.create_sandbox()`
+- `await manager.find_sandbox(labels={"thread_id": thread_id})`
 - `await manager.find_or_create_sandbox(labels={"thread_id": thread_id})`
 - `await manager.get_sandbox(id)`
 - `await manager.start_sandbox(id) / stop_sandbox(id) / delete_sandbox(id)`

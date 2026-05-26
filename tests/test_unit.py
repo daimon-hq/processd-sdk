@@ -286,6 +286,35 @@ async def test_daimon_sandbox_lifecycle_updates_info_and_closes_client() -> None
 
 
 @pytest.mark.asyncio
+async def test_manager_find_sandbox_posts_labels(monkeypatch) -> None:
+    from daimon_sdk.manager import DaimonManagerClient, DaimonSandbox
+
+    captured: dict[str, object] = {}
+
+    async def fake_json(method: str, path: str, *, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = body
+        return dict(SANDBOX_PAYLOAD)
+
+    manager = DaimonManagerClient("http://127.0.0.1:18080")
+    monkeypatch.setattr(manager._transport, "json", fake_json)
+
+    sandbox = await manager.find_sandbox(
+        labels={"thread_id": "thread-a"},
+        ttl_seconds=60,
+    )
+
+    assert isinstance(sandbox, DaimonSandbox)
+    assert sandbox.id == "sandbox-1"
+    assert captured == {
+        "method": "POST",
+        "path": "/sandboxes/find",
+        "body": {"labels": {"thread_id": "thread-a"}, "ttl_seconds": 60},
+    }
+
+
+@pytest.mark.asyncio
 async def test_manager_update_sandbox_omits_none_fields(monkeypatch) -> None:
     from daimon_sdk.manager import DaimonManagerClient
 

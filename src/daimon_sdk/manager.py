@@ -241,6 +241,20 @@ class DaimonManagerClient:
         )
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
 
+    async def find_sandbox(
+        self,
+        *,
+        labels: dict[str, str],
+        ttl_seconds: int | None = None,
+    ) -> DaimonSandbox:
+        body: dict[str, Any] = {"labels": labels}
+        if ttl_seconds is not None:
+            body["ttl_seconds"] = ttl_seconds
+        info = SandboxInfo.from_dict(
+            await self._transport.json("POST", "/sandboxes/find", body=body)
+        )
+        return DaimonSandbox(self, info, timeout_s=self.timeout_s)
+
     async def get_sandbox(self, sandbox_id: str) -> SandboxInfo:
         return SandboxInfo.from_dict(await self._transport.json("GET", f"/sandboxes/{sandbox_id}"))
 
