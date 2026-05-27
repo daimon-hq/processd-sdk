@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 from fastmcp import Client
@@ -165,22 +166,57 @@ class FastMCPTransportAdapter:
             except Exception as exc:  # pragma: no cover - transport failures vary
                 raise DaimonConnectionError(str(exc)) from exc
         if response.status_code >= 400:
-            payload: dict[str, Any] = {}
-            try:
-                raw_payload = response.json()
-                if isinstance(raw_payload, dict):
-                    payload = dict(raw_payload)
-            except Exception:
-                payload = {}
-            message = payload.get("error")
-            if not isinstance(message, str) or not message:
-                message = response.text or f"http {response.status_code}"
-            raise DaimonHttpError(
-                message,
-                status_code=response.status_code,
-                payload=payload,
-            )
+            self._raise_http_error(response.status_code, response.content)
         return response
+
+    @asynccontextmanager
+    async def stream_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        content: Any = None,
+    ) -> AsyncIterator[httpx.Response]:
+        headers = {"X-Access-Token": self.access_token} if self.access_token else None
+        async with self._httpx_client_factory(headers=headers) as client:
+            url = f"{self._service_base_url()}{path}"
+            try:
+                async with client.stream(
+                    method,
+                    url,
+                    params=params,
+                    content=content,
+                ) as response:
+                    if response.status_code >= 400:
+                        self._raise_http_error(response.status_code, await response.aread())
+                    yield response
+            except DaimonHttpError:
+                raise
+            except Exception as exc:  # pragma: no cover - transport failures vary
+                raise DaimonConnectionError(str(exc)) from exc
+
+    def _raise_http_error(self, status_code: int, body: bytes) -> None:
+        payload: dict[str, Any] = {}
+        text = ""
+        try:
+            text = body.decode("utf-8", errors="replace")
+        except Exception:
+            text = ""
+        try:
+            raw_payload = json.loads(text)
+            if isinstance(raw_payload, dict):
+                payload = dict(raw_payload)
+        except Exception:
+            payload = {}
+        message = payload.get("error")
+        if not isinstance(message, str) or not message:
+            message = text or f"http {status_code}"
+        raise DaimonHttpError(
+            message,
+            status_code=status_code,
+            payload=payload,
+        )
 
     def _httpx_client_factory(self, **kwargs: Any) -> httpx.AsyncClient:
         headers = dict(kwargs.pop("headers", {}) or {})

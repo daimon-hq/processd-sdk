@@ -151,6 +151,23 @@ async def test_files_roundtrip_and_search(client, tmp_path: Path) -> None:
     downloaded = await client.files.download_bytes(str(tmp_path / "binary" / "blob.bin"))
     assert downloaded == b"\x00\x01\x02"
 
+    async def stream_chunks():
+        yield b"stream-"
+        yield b"upload"
+
+    streamed = await client.files.upload_stream(
+        str(tmp_path / "binary" / "stream.bin"),
+        stream_chunks(),
+    )
+    assert streamed.bytes_written == len(b"stream-upload")
+    streamed_chunks = [
+        chunk
+        async for chunk in client.files.download_stream(
+            str(tmp_path / "binary" / "stream.bin")
+        )
+    ]
+    assert b"".join(streamed_chunks) == b"stream-upload"
+
     local_copy = await client.files.download_file(
         str(tmp_path / "binary" / "blob.bin"),
         tmp_path / "downloaded" / "copy.bin",

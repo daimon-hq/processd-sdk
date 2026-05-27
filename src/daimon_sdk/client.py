@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +74,7 @@ class RuntimeAPI:
 class FilesAPI:
     def __init__(self, client: "DaimonClient") -> None:
         self._client = client
+        self._transfer_chunk_size = 1024 * 1024
 
     async def read(
         self,
@@ -242,13 +245,18 @@ class FilesAPI:
             display_text=envelope.display_text,
         )
 
-    async def upload_bytes(self, file_path: str, data: bytes) -> FileTransferResult:
-        response = await self._client._transport.request(
+    async def upload_stream(
+        self,
+        file_path: str,
+        chunks: AsyncIterable[bytes],
+    ) -> FileTransferResult:
+        async with self._client._transport.stream_request(
             "PUT",
             "/sdk/file",
             params={"path": file_path},
-            content=data,
-        )
+            content=chunks,
+        ) as response:
+            await response.aread()
         payload = response.json()
         return FileTransferResult(
             file_path=payload["filePath"],
@@ -259,22 +267,47 @@ class FilesAPI:
             raw_payload=payload,
         )
 
-    async def download_bytes(self, file_path: str) -> bytes:
-        response = await self._client._transport.request(
+    async def download_stream(self, file_path: str) -> AsyncIterator[bytes]:
+        async with self._client._transport.stream_request(
             "GET",
             "/sdk/file",
             params={"path": file_path},
-        )
-        return response.content
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                if chunk:
+                    yield chunk
+
+    async def upload_bytes(self, file_path: str, data: bytes) -> FileTransferResult:
+        async def chunks() -> AsyncIterator[bytes]:
+            yield data
+
+        return await self.upload_stream(file_path, chunks())
+
+    async def download_bytes(self, file_path: str) -> bytes:
+        chunks: list[bytes] = []
+        async for chunk in self.download_stream(file_path):
+            chunks.append(chunk)
+        return b"".join(chunks)
 
     async def upload_file(self, local_path: str | Path, remote_path: str) -> FileTransferResult:
         local_path = Path(local_path)
-        return await self.upload_bytes(remote_path, local_path.read_bytes())
+
+        async def chunks() -> AsyncIterator[bytes]:
+            with local_path.open("rb") as file:
+                while True:
+                    chunk = await asyncio.to_thread(file.read, self._transfer_chunk_size)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return await self.upload_stream(remote_path, chunks())
 
     async def download_file(self, remote_path: str, local_path: str | Path) -> Path:
         local_path = Path(local_path)
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        local_path.write_bytes(await self.download_bytes(remote_path))
+        with local_path.open("wb") as file:
+            async for chunk in self.download_stream(remote_path):
+                await asyncio.to_thread(file.write, chunk)
         return local_path
 
 
