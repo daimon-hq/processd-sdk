@@ -216,6 +216,19 @@ def test_manager_models_parse_payloads() -> None:
     assert capacity.raw_payload["capacity_source"] == "/sys/fs/cgroup/test"
 
 
+def test_sandbox_info_rewrites_localhost_proxy_urls_from_manager_base_url() -> None:
+    sandbox = SandboxInfo.from_dict(
+        SANDBOX_PAYLOAD,
+        base_url="http://192.168.4.250:18080",
+    )
+
+    assert sandbox.mcp_url == "http://192.168.4.250:18080/mcp"
+    assert sandbox.service_ports[0].url == (
+        "http://192.168.4.250:18080/sandboxes/sandbox-1/ports/3000/"
+    )
+    assert sandbox.service_ports[0].headers == {"X-Access-Token": "pdm-token"}
+
+
 @pytest.mark.asyncio
 async def test_manager_http_transport_preserves_429_payload() -> None:
     server = _QuietHTTPServer(("127.0.0.1", 0), _ErrorHandler)

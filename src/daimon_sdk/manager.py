@@ -234,8 +234,11 @@ class DaimonManagerClient:
     async def capacity(self) -> ManagerCapacityResult:
         return ManagerCapacityResult.from_dict(await self._transport.json("GET", "/capacity"))
 
+    def _sandbox_info(self, payload: dict[str, Any]) -> SandboxInfo:
+        return SandboxInfo.from_dict(payload, base_url=self.base_url)
+
     async def create_sandbox(self) -> DaimonSandbox:
-        info = SandboxInfo.from_dict(await self._transport.json("POST", "/sandboxes"))
+        info = self._sandbox_info(await self._transport.json("POST", "/sandboxes"))
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
 
     async def find_or_create_sandbox(
@@ -247,7 +250,7 @@ class DaimonManagerClient:
         body: dict[str, Any] = {"labels": labels}
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
-        info = SandboxInfo.from_dict(
+        info = self._sandbox_info(
             await self._transport.json("POST", "/sandboxes/find-or-create", body=body)
         )
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
@@ -261,21 +264,21 @@ class DaimonManagerClient:
         body: dict[str, Any] = {"labels": labels}
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
-        info = SandboxInfo.from_dict(
+        info = self._sandbox_info(
             await self._transport.json("POST", "/sandboxes/find", body=body)
         )
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
 
     async def get_sandbox(self, sandbox_id: str) -> SandboxInfo:
-        return SandboxInfo.from_dict(await self._transport.json("GET", f"/sandboxes/{sandbox_id}"))
+        return self._sandbox_info(await self._transport.json("GET", f"/sandboxes/{sandbox_id}"))
 
     async def start_sandbox(self, sandbox_id: str) -> SandboxInfo:
-        return SandboxInfo.from_dict(
+        return self._sandbox_info(
             await self._transport.json("POST", f"/sandboxes/{sandbox_id}/start")
         )
 
     async def stop_sandbox(self, sandbox_id: str) -> SandboxInfo:
-        return SandboxInfo.from_dict(
+        return self._sandbox_info(
             await self._transport.json("POST", f"/sandboxes/{sandbox_id}/stop")
         )
 
@@ -292,7 +295,7 @@ class DaimonManagerClient:
         body = {key: value for key, value in updates.items() if value is not None}
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
-        return SandboxInfo.from_dict(
+        return self._sandbox_info(
             await self._transport.json("PATCH", f"/sandboxes/{sandbox_id}", body=body or None)
         )
 

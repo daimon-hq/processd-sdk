@@ -4,6 +4,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit, urlunsplit
 
 if TYPE_CHECKING:
     from .client import DaimonClient
@@ -149,10 +150,16 @@ class ServicePortInfo:
     headers: dict[str, str]
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], *, token: str) -> "ServicePortInfo":
+    def from_dict(
+        cls,
+        payload: dict[str, Any],
+        *,
+        token: str,
+        base_url: str | None = None,
+    ) -> "ServicePortInfo":
         return cls(
             port=int(payload["port"]),
-            url=str(payload["url"]),
+            url=_normalize_manager_proxy_url(str(payload["url"]), base_url),
             token=token,
             headers={"X-Access-Token": token},
         )
@@ -175,19 +182,19 @@ class SandboxInfo:
     raw_payload: dict[str, Any]
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "SandboxInfo":
+    def from_dict(cls, payload: dict[str, Any], *, base_url: str | None = None) -> "SandboxInfo":
         token = str(payload["token"])
         return cls(
             id=str(payload["id"]),
             state=str(payload["state"]),
-            mcp_url=str(payload["mcp_url"]),
+            mcp_url=_normalize_manager_proxy_url(str(payload["mcp_url"]), base_url),
             token=token,
             workspace=str(payload["workspace"]),
             created_at=int(payload["created_at"]),
             limits=LimitsStatus.from_dict(payload.get("limits")),
             labels={str(k): str(v) for k, v in dict(payload.get("labels") or {}).items()},
             service_ports=[
-                ServicePortInfo.from_dict(dict(item), token=token)
+                ServicePortInfo.from_dict(dict(item), token=token, base_url=base_url)
                 for item in list(payload.get("service_ports") or [])
             ],
             last_used_at=int(payload.get("last_used_at") or payload["created_at"]),
@@ -253,6 +260,18 @@ def _int_or_none(value: Any) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _normalize_manager_proxy_url(url: str, base_url: str | None) -> str:
+    if not base_url:
+        return url
+    parsed = urlsplit(url)
+    base = urlsplit(base_url.rstrip("/"))
+    if parsed.scheme not in {"http", "https"} or base.scheme not in {"http", "https"}:
+        return url
+    if parsed.hostname not in {"127.0.0.1", "localhost", "0.0.0.0", "::1"}:
+        return url
+    return urlunsplit((base.scheme, base.netloc, parsed.path, parsed.query, parsed.fragment))
 
 
 @dataclass(slots=True)
