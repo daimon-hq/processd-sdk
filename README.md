@@ -106,6 +106,8 @@ print(read.file.content)
 - `await manager.update_sandbox(id, ttl_seconds=...)`
 - `async with manager.sandbox() as sandbox`
 - `await sandbox.set_ttl(ttl_seconds)`
+- `sandbox.service_ports`
+- `sandbox.get_service_port(port)`
 - `sandbox.runtime/files/exec/web/raw`
 
 `manager.sandbox()` creates a sandbox, connects to its MCP endpoint, and deletes
@@ -113,6 +115,24 @@ it on context exit by default. Use `delete_on_exit=False` or
 `create_sandbox()` when the workspace should survive beyond the context.
 `ttl_seconds=0` marks a sandbox as immediately expired so the next manager
 reaper loop deletes it.
+
+## Sandbox Service Ports
+
+When a sandbox runs a service on a manager-configured port, the SDK exposes the
+connection information and leaves the request itself to your HTTP or WebSocket
+client:
+
+```python
+import httpx
+
+async with manager.sandbox() as sandbox:
+    web = sandbox.get_service_port(3000)
+
+    response = httpx.get(web.url + "hello.txt", headers=web.headers)
+    print(response.text)
+```
+
+`ServicePortInfo` contains only `port`, `url`, `token`, and `headers`.
 
 ## Local Testing
 

@@ -142,6 +142,23 @@ class LimitsStatus:
 
 
 @dataclass(slots=True)
+class ServicePortInfo:
+    port: int
+    url: str
+    token: str
+    headers: dict[str, str]
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, token: str) -> "ServicePortInfo":
+        return cls(
+            port=int(payload["port"]),
+            url=str(payload["url"]),
+            token=token,
+            headers={"X-Access-Token": token},
+        )
+
+
+@dataclass(slots=True)
 class SandboxInfo:
     id: str
     state: str
@@ -151,6 +168,7 @@ class SandboxInfo:
     created_at: int
     limits: LimitsStatus
     labels: dict[str, str]
+    service_ports: list[ServicePortInfo]
     last_used_at: int
     ttl_seconds: int | None
     expires_at: int | None
@@ -158,15 +176,20 @@ class SandboxInfo:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SandboxInfo":
+        token = str(payload["token"])
         return cls(
             id=str(payload["id"]),
             state=str(payload["state"]),
             mcp_url=str(payload["mcp_url"]),
-            token=str(payload["token"]),
+            token=token,
             workspace=str(payload["workspace"]),
             created_at=int(payload["created_at"]),
             limits=LimitsStatus.from_dict(payload.get("limits")),
             labels={str(k): str(v) for k, v in dict(payload.get("labels") or {}).items()},
+            service_ports=[
+                ServicePortInfo.from_dict(dict(item), token=token)
+                for item in list(payload.get("service_ports") or [])
+            ],
             last_used_at=int(payload.get("last_used_at") or payload["created_at"]),
             ttl_seconds=_int_or_none(payload.get("ttl_seconds")),
             expires_at=_int_or_none(payload.get("expires_at")),

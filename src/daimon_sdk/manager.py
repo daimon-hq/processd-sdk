@@ -6,7 +6,7 @@ import httpx
 
 from .client import DaimonClient
 from .exceptions import DaimonConnectionError, DaimonHttpError
-from .models import ManagerCapacityResult, SandboxInfo
+from .models import ManagerCapacityResult, SandboxInfo, ServicePortInfo
 
 
 class ManagerHTTPTransport:
@@ -93,6 +93,16 @@ class DaimonSandbox:
         return self.info.id
 
     @property
+    def service_ports(self) -> list[ServicePortInfo]:
+        return self.info.service_ports
+
+    def get_service_port(self, port: int) -> ServicePortInfo:
+        for service_port in self.info.service_ports:
+            if service_port.port == port:
+                return service_port
+        raise ValueError(f"service port is not available: {port}")
+
+    @property
     def runtime(self):
         return self.client.runtime
 
@@ -154,6 +164,7 @@ class DaimonSandbox:
             created_at=self.info.created_at,
             limits=self.info.limits,
             labels=self.info.labels,
+            service_ports=self.info.service_ports,
             last_used_at=self.info.last_used_at,
             ttl_seconds=self.info.ttl_seconds,
             expires_at=self.info.expires_at,

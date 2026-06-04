@@ -47,6 +47,23 @@ SANDBOX_PAYLOAD = {
         "cgroup": "applied",
         "cgroup_reason": None,
     },
+    "sandbox_ip": "10.255.0.2",
+    "service_ports": [
+        {
+            "port": 3000,
+            "host_port": 19001,
+            "url": "http://127.0.0.1:18080/sandboxes/sandbox-1/ports/3000/",
+            "created_at": 125,
+            "updated_at": 126,
+        },
+        {
+            "port": 3001,
+            "host_port": 19002,
+            "url": "http://127.0.0.1:18080/sandboxes/sandbox-1/ports/3001/",
+            "created_at": 125,
+            "updated_at": 126,
+        },
+    ],
 }
 
 
@@ -181,6 +198,16 @@ def test_manager_models_parse_payloads() -> None:
     assert sandbox.ttl_seconds == 3600
     assert sandbox.expires_at == 3724
     assert sandbox.raw_payload["mcp_url"] == SANDBOX_PAYLOAD["mcp_url"]
+    assert len(sandbox.service_ports) == 2
+    assert sandbox.service_ports[0].port == 3000
+    assert sandbox.service_ports[0].url == (
+        "http://127.0.0.1:18080/sandboxes/sandbox-1/ports/3000/"
+    )
+    assert sandbox.service_ports[0].token == "pdm-token"
+    assert sandbox.service_ports[0].headers == {"X-Access-Token": "pdm-token"}
+    assert not hasattr(sandbox.service_ports[0], "host_port")
+    assert not hasattr(sandbox.service_ports[0], "sandbox_ip")
+    assert not hasattr(sandbox.service_ports[0], "mcp_url")
 
     capacity = ManagerCapacityResult.from_dict(CAPACITY_PAYLOAD)
     assert capacity.mode == "resource"
@@ -208,6 +235,18 @@ async def test_manager_http_transport_preserves_429_payload() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_daimon_sandbox_service_port_helpers() -> None:
+    info = SandboxInfo.from_dict(SANDBOX_PAYLOAD)
+    sandbox = DaimonSandbox.__new__(DaimonSandbox)
+    sandbox.info = info
+
+    service_port = sandbox.get_service_port(3000)
+    assert service_port == sandbox.service_ports[0]
+
+    with pytest.raises(ValueError, match="service port is not available: 3010"):
+        sandbox.get_service_port(3010)
 
 
 @pytest.mark.asyncio
