@@ -63,9 +63,10 @@ class ManagerHTTPTransport:
         method: str,
         path: str,
         *,
+        params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        response = await self.request(method, path, json=body)
+        response = await self.request(method, path, params=params, json=body)
         payload = response.json()
         if not isinstance(payload, dict):
             raise DaimonConnectionError(f"manager response was not a JSON object: {payload!r}")
@@ -240,6 +241,27 @@ class DaimonManagerClient:
     async def create_sandbox(self) -> DaimonSandbox:
         info = self._sandbox_info(await self._transport.json("POST", "/sandboxes"))
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
+
+    async def list_sandboxes(
+        self,
+        *,
+        labels: dict[str, str] | None = None,
+        states: list[str] | tuple[str, ...] | None = None,
+    ) -> list[SandboxInfo]:
+        params: dict[str, Any] = {}
+        if states:
+            params["state"] = list(states)
+        for key, value in (labels or {}).items():
+            params[f"label.{key}"] = value
+        payload = await self._transport.json(
+            "GET",
+            "/sandboxes",
+            params=params or None,
+        )
+        sandboxes = payload.get("sandboxes")
+        if not isinstance(sandboxes, list):
+            raise DaimonConnectionError("manager response missing sandboxes list")
+        return [self._sandbox_info(dict(item)) for item in sandboxes]
 
     async def find_or_create_sandbox(
         self,

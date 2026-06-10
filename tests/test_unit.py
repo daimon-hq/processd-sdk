@@ -338,6 +338,43 @@ async def test_daimon_sandbox_lifecycle_updates_info_and_closes_client() -> None
 
 
 @pytest.mark.asyncio
+async def test_manager_list_sandboxes_gets_filtered_sandbox_list(monkeypatch) -> None:
+    from daimon_sdk.manager import DaimonManagerClient
+
+    captured: dict[str, object] = {}
+    second = dict(SANDBOX_PAYLOAD)
+    second["id"] = "sandbox-2"
+    second["state"] = "stopped"
+
+    async def fake_json(method: str, path: str, *, params=None, body=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["params"] = params
+        captured["body"] = body
+        return {"sandboxes": [dict(SANDBOX_PAYLOAD), second]}
+
+    manager = DaimonManagerClient("http://127.0.0.1:18080")
+    monkeypatch.setattr(manager._transport, "json", fake_json)
+
+    sandboxes = await manager.list_sandboxes(
+        labels={"thread_id": "thread-a"},
+        states=["running", "stopped"],
+    )
+
+    assert [sandbox.id for sandbox in sandboxes] == ["sandbox-1", "sandbox-2"]
+    assert sandboxes[1].state == "stopped"
+    assert captured == {
+        "method": "GET",
+        "path": "/sandboxes",
+        "params": {
+            "state": ["running", "stopped"],
+            "label.thread_id": "thread-a",
+        },
+        "body": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_manager_find_sandbox_posts_labels(monkeypatch) -> None:
     from daimon_sdk.manager import DaimonManagerClient, DaimonSandbox
 
