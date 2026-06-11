@@ -114,6 +114,10 @@ print(read.file.content)
 `manager.sandbox()` creates a sandbox, connects to its MCP endpoint, and deletes
 it on context exit by default. Use `delete_on_exit=False` or
 `create_sandbox()` when the workspace should survive beyond the context.
+`find_sandbox(labels=...)` is a read-only lookup by default and does not extend
+the sandbox TTL. Pass `ttl_seconds=...` only when you intentionally want the
+manager's compatibility renew behavior, or use `find_or_create_sandbox(...)`
+for normal acquire/renew flows.
 `ttl_seconds=0` marks a sandbox as immediately expired so the next manager
 reaper loop deletes it.
 
