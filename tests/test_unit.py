@@ -233,6 +233,21 @@ def test_sandbox_info_action_is_none_for_unknown_value() -> None:
     assert sandbox.raw_payload["action"] == "some_future_action"
 
 
+@pytest.mark.parametrize("action", list(SandboxAction))
+def test_sandbox_info_action_round_trips_all_wire_values(action: SandboxAction) -> None:
+    payload = {**SANDBOX_PAYLOAD, "action": action.value}
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.action is action
+    assert sandbox.action == action.value
+
+
+@pytest.mark.parametrize("bad_value", [0, 1, True, ["reused"], {"a": 1}, b"reused"])
+def test_sandbox_info_action_is_none_for_non_string_values(bad_value) -> None:
+    payload = {**SANDBOX_PAYLOAD, "action": bad_value}
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.action is None
+
+
 def test_sandbox_info_rewrites_localhost_proxy_urls_from_manager_base_url() -> None:
     sandbox = SandboxInfo.from_dict(
         SANDBOX_PAYLOAD,
