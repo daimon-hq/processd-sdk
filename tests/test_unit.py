@@ -13,6 +13,7 @@ from daimon_sdk.manager import DaimonSandbox, ManagerHTTPTransport
 from daimon_sdk.models import (
     ExecResult,
     ManagerCapacityResult,
+    SandboxAction,
     SandboxInfo,
     SessionHandle,
 )
@@ -42,6 +43,7 @@ SANDBOX_PAYLOAD = {
     "last_used_at": 124,
     "ttl_seconds": 3600,
     "expires_at": 3724,
+    "action": "reused",
     "limits": {
         "rlimit": "applied",
         "cgroup": "applied",
@@ -197,6 +199,8 @@ def test_manager_models_parse_payloads() -> None:
     assert sandbox.labels["thread_id"] == "thread-a"
     assert sandbox.ttl_seconds == 3600
     assert sandbox.expires_at == 3724
+    assert sandbox.action == SandboxAction.REUSED
+    assert sandbox.action == "reused"
     assert sandbox.raw_payload["mcp_url"] == SANDBOX_PAYLOAD["mcp_url"]
     assert len(sandbox.service_ports) == 2
     assert sandbox.service_ports[0].port == 3000
@@ -214,6 +218,19 @@ def test_manager_models_parse_payloads() -> None:
     assert capacity.memory_bytes.capacity == 8589934592
     assert capacity.cpu_ms_per_sec.available == 2500
     assert capacity.raw_payload["capacity_source"] == "/sys/fs/cgroup/test"
+
+
+def test_sandbox_info_action_defaults_to_none_when_missing() -> None:
+    payload = {key: value for key, value in SANDBOX_PAYLOAD.items() if key != "action"}
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.action is None
+
+
+def test_sandbox_info_action_is_none_for_unknown_value() -> None:
+    payload = {**SANDBOX_PAYLOAD, "action": "some_future_action"}
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.action is None
+    assert sandbox.raw_payload["action"] == "some_future_action"
 
 
 def test_sandbox_info_rewrites_localhost_proxy_urls_from_manager_base_url() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -165,6 +166,21 @@ class ServicePortInfo:
         )
 
 
+class SandboxAction(StrEnum):
+    """Which branch an actuating manager endpoint took to produce a SandboxInfo.
+
+    Only set on `create`/`find-or-create`/`start`/`stop` responses; read-only
+    endpoints (`get`/`list`/`find`/`patch`) leave it ``None``.
+    """
+
+    CREATED = "created"
+    REUSED = "reused"
+    STARTED = "started"
+    ALREADY_RUNNING = "already_running"
+    STOPPED = "stopped"
+    ALREADY_STOPPED = "already_stopped"
+
+
 @dataclass(slots=True)
 class SandboxInfo:
     id: str
@@ -180,6 +196,7 @@ class SandboxInfo:
     ttl_seconds: int | None
     expires_at: int | None
     raw_payload: dict[str, Any]
+    action: SandboxAction | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, base_url: str | None = None) -> "SandboxInfo":
@@ -201,6 +218,7 @@ class SandboxInfo:
             ttl_seconds=_int_or_none(payload.get("ttl_seconds")),
             expires_at=_int_or_none(payload.get("expires_at")),
             raw_payload=dict(payload),
+            action=_action_or_none(payload.get("action")),
         )
 
 
@@ -260,6 +278,20 @@ def _int_or_none(value: Any) -> int | None:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return None
+
+
+def _action_or_none(value: Any) -> SandboxAction | None:
+    """Leniently parse an ``action`` value; unknown/missing values become None.
+
+    Keeps older SDKs working if the manager later adds new action values. The
+    original string is always preserved in ``SandboxInfo.raw_payload``.
+    """
+    if value is None:
+        return None
+    try:
+        return SandboxAction(str(value))
+    except ValueError:
+        return None
 
 
 def _normalize_manager_proxy_url(url: str, base_url: str | None) -> str:
