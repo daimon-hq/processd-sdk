@@ -9,10 +9,11 @@ import pytest
 from daimon_sdk import DaimonClient
 from daimon_sdk._transport import ToolCallEnvelope, content_blocks_display_text, decode_tool_result
 from daimon_sdk.exceptions import DaimonHttpError, DaimonProtocolError
-from daimon_sdk.manager import DaimonSandbox, ManagerHTTPTransport
+from daimon_sdk.manager import DaimonManagerClient, DaimonSandbox, ManagerHTTPTransport
 from daimon_sdk.models import (
     ExecResult,
     ManagerCapacityResult,
+    NetworkPolicy,
     SandboxAction,
     SandboxInfo,
     SessionHandle,
@@ -50,6 +51,12 @@ SANDBOX_PAYLOAD = {
         "cgroup_reason": None,
     },
     "sandbox_ip": "10.255.0.2",
+    "network_policy": {
+        "mode": "whitelist",
+        "allow_domains": ["example.com"],
+        "allow_ports": [80, 443],
+        "allow_private_ips": False,
+    },
     "service_ports": [
         {
             "port": 3000,
@@ -128,6 +135,32 @@ class _ErrorHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(encoded)))
         self.end_headers()
         self.wfile.write(encoded)
+
+
+class _CreateSandboxHandler(BaseHTTPRequestHandler):
+    """Records request bodies and replies with the canonical sandbox payload."""
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else b""
+        self.server.captured_requests.append((self.path, body))
+        encoded = json.dumps(SANDBOX_PAYLOAD).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+
+def _start_capture_server() -> tuple[_QuietHTTPServer, threading.Thread]:
+    server = _QuietHTTPServer(("127.0.0.1", 0), _CreateSandboxHandler)
+    server.captured_requests = []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
 
 
 class DummyClient:
@@ -213,11 +246,50 @@ def test_manager_models_parse_payloads() -> None:
     assert not hasattr(sandbox.service_ports[0], "sandbox_ip")
     assert not hasattr(sandbox.service_ports[0], "mcp_url")
 
+    policy = sandbox.network_policy
+    assert policy is not None
+    assert policy.mode == "whitelist"
+    assert policy.allow_domains == ["example.com"]
+    assert policy.allow_ports == [80, 443]
+    assert policy.allow_private_ips is False
+    assert policy.raw_payload["mode"] == "whitelist"
+
     capacity = ManagerCapacityResult.from_dict(CAPACITY_PAYLOAD)
     assert capacity.mode == "resource"
     assert capacity.memory_bytes.capacity == 8589934592
     assert capacity.cpu_ms_per_sec.available == 2500
     assert capacity.raw_payload["capacity_source"] == "/sys/fs/cgroup/test"
+
+
+def test_sandbox_info_network_policy_defaults_to_none_when_missing() -> None:
+    payload = {key: value for key, value in SANDBOX_PAYLOAD.items() if key != "network_policy"}
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.network_policy is None
+
+
+def test_network_policy_to_dict_shapes() -> None:
+    assert NetworkPolicy.full().to_dict() == {"mode": "full"}
+    # None fields are omitted so the manager applies its defaults.
+    assert NetworkPolicy.whitelist(["example.com"]).to_dict() == {
+        "mode": "whitelist",
+        "allow_domains": ["example.com"],
+    }
+    assert NetworkPolicy.whitelist(
+        ["example.com", "*.rust-lang.org"],
+        allow_ports=[443],
+        allow_private_ips=True,
+    ).to_dict() == {
+        "mode": "whitelist",
+        "allow_domains": ["example.com", "*.rust-lang.org"],
+        "allow_ports": [443],
+        "allow_private_ips": True,
+    }
+    # An empty allow_domains list is meaningful (blocks all egress) and must
+    # be sent explicitly.
+    assert NetworkPolicy.whitelist([]).to_dict() == {
+        "mode": "whitelist",
+        "allow_domains": [],
+    }
 
 
 def test_sandbox_info_action_defaults_to_none_when_missing() -> None:
@@ -276,6 +348,82 @@ async def test_manager_http_transport_preserves_429_payload() -> None:
             await transport.request("POST", "/sandboxes")
         assert exc_info.value.status_code == 429
         assert exc_info.value.payload["admission"]["missing"][0]["resource"] == "memory_bytes"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_sends_no_body_without_policy() -> None:
+    server, thread = _start_capture_server()
+    try:
+        manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        sandbox = await manager.create_sandbox()
+        assert server.captured_requests == [("/sandboxes", b"")]
+        # The response policy is parsed onto the sandbox info.
+        assert sandbox.info.network_policy is not None
+        assert sandbox.info.network_policy.mode == "whitelist"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_sends_network_policy_body() -> None:
+    server, thread = _start_capture_server()
+    try:
+        manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        await manager.create_sandbox(
+            network_policy=NetworkPolicy.whitelist(["example.com"], allow_ports=[443])
+        )
+        path, body = server.captured_requests[0]
+        assert path == "/sandboxes"
+        assert json.loads(body) == {
+            "network_policy": {
+                "mode": "whitelist",
+                "allow_domains": ["example.com"],
+                "allow_ports": [443],
+            }
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_accepts_dict_policy() -> None:
+    server, thread = _start_capture_server()
+    try:
+        manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        await manager.create_sandbox(
+            network_policy={"mode": "whitelist", "allow_domains": []}
+        )
+        _, body = server.captured_requests[0]
+        assert json.loads(body) == {"network_policy": {"mode": "whitelist", "allow_domains": []}}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_find_or_create_sandbox_includes_network_policy() -> None:
+    server, thread = _start_capture_server()
+    try:
+        manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        await manager.find_or_create_sandbox(
+            labels={"thread_id": "thread-a"},
+            network_policy=NetworkPolicy.whitelist(["example.com"]),
+        )
+        path, body = server.captured_requests[0]
+        assert path == "/sandboxes/find-or-create"
+        assert json.loads(body) == {
+            "labels": {"thread_id": "thread-a"},
+            "network_policy": {"mode": "whitelist", "allow_domains": ["example.com"]},
+        }
     finally:
         server.shutdown()
         server.server_close()
@@ -491,7 +639,7 @@ async def test_manager_sandbox_context_deletes_on_exception(monkeypatch) -> None
 
     calls: list[str] = []
 
-    async def fake_create(self):
+    async def fake_create(self, **kwargs):
         return DaimonSandbox(self, SandboxInfo.from_dict(SANDBOX_PAYLOAD), timeout_s=30)
 
     async def fake_connect(self):
@@ -519,7 +667,7 @@ async def test_manager_sandbox_context_can_leave_sandbox_running(monkeypatch) ->
 
     calls: list[str] = []
 
-    async def fake_create(self):
+    async def fake_create(self, **kwargs):
         return DaimonSandbox(self, SandboxInfo.from_dict(SANDBOX_PAYLOAD), timeout_s=30)
 
     async def fake_connect(self):

@@ -166,6 +166,82 @@ class ServicePortInfo:
         )
 
 
+@dataclass(slots=True)
+class NetworkPolicy:
+    """Per-sandbox egress policy, mirroring the manager's ``network_policy``.
+
+    ``full`` (the manager default) leaves networking unrestricted.
+    ``whitelist`` blocks all direct egress; sandbox processes can only reach
+    the whitelisted domains through the manager's per-sandbox CONNECT proxy
+    (an empty ``allow_domains`` blocks all egress).
+    """
+
+    FULL = "full"
+    WHITELIST = "whitelist"
+
+    mode: str
+    allow_domains: list[str]
+    allow_ports: list[int] | None
+    allow_private_ips: bool | None
+    raw_payload: dict[str, Any]
+
+    @classmethod
+    def full(cls) -> "NetworkPolicy":
+        return cls(
+            mode=cls.FULL,
+            allow_domains=[],
+            allow_ports=None,
+            allow_private_ips=None,
+            raw_payload={},
+        )
+
+    @classmethod
+    def whitelist(
+        cls,
+        allow_domains: list[str],
+        *,
+        allow_ports: list[int] | None = None,
+        allow_private_ips: bool | None = None,
+    ) -> "NetworkPolicy":
+        return cls(
+            mode=cls.WHITELIST,
+            allow_domains=list(allow_domains),
+            allow_ports=list(allow_ports) if allow_ports is not None else None,
+            allow_private_ips=allow_private_ips,
+            raw_payload={},
+        )
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "NetworkPolicy | None":
+        if payload is None:
+            return None
+        payload = dict(payload)
+        allow_ports = payload.get("allow_ports")
+        allow_private_ips = payload.get("allow_private_ips")
+        return cls(
+            mode=str(payload.get("mode", "full")),
+            allow_domains=[str(domain) for domain in list(payload.get("allow_domains") or [])],
+            allow_ports=[int(port) for port in list(allow_ports)]
+            if allow_ports is not None
+            else None,
+            allow_private_ips=None if allow_private_ips is None else bool(allow_private_ips),
+            raw_payload=payload,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.mode == self.FULL:
+            return {"mode": self.FULL}
+        body: dict[str, Any] = {
+            "mode": self.mode,
+            "allow_domains": list(self.allow_domains),
+        }
+        if self.allow_ports is not None:
+            body["allow_ports"] = list(self.allow_ports)
+        if self.allow_private_ips is not None:
+            body["allow_private_ips"] = self.allow_private_ips
+        return body
+
+
 class SandboxAction(StrEnum):
     """Which branch an actuating manager endpoint took to produce a SandboxInfo.
 
@@ -197,6 +273,7 @@ class SandboxInfo:
     expires_at: int | None
     raw_payload: dict[str, Any]
     action: SandboxAction | None = None
+    network_policy: NetworkPolicy | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, base_url: str | None = None) -> "SandboxInfo":
@@ -219,6 +296,7 @@ class SandboxInfo:
             expires_at=_int_or_none(payload.get("expires_at")),
             raw_payload=dict(payload),
             action=_action_or_none(payload.get("action")),
+            network_policy=NetworkPolicy.from_dict(payload.get("network_policy")),
         )
 
 

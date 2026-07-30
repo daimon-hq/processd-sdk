@@ -6,7 +6,16 @@ import httpx
 
 from .client import DaimonClient
 from .exceptions import DaimonConnectionError, DaimonHttpError
-from .models import ManagerCapacityResult, SandboxInfo, ServicePortInfo
+from .models import ManagerCapacityResult, NetworkPolicy, SandboxInfo, ServicePortInfo
+
+
+def _network_policy_body(policy: NetworkPolicy | dict[str, Any] | None) -> dict[str, Any] | None:
+    """Normalizes a user-supplied policy into a request body fragment."""
+    if policy is None:
+        return None
+    if isinstance(policy, NetworkPolicy):
+        return policy.to_dict()
+    return dict(policy)
 
 
 class ManagerHTTPTransport:
@@ -170,6 +179,8 @@ class DaimonSandbox:
             ttl_seconds=self.info.ttl_seconds,
             expires_at=self.info.expires_at,
             raw_payload=self.info.raw_payload,
+            action=self.info.action,
+            network_policy=self.info.network_policy,
         )
 
     async def __aenter__(self) -> "DaimonSandbox":
@@ -180,13 +191,20 @@ class DaimonSandbox:
 
 
 class SandboxContext:
-    def __init__(self, manager: "DaimonManagerClient", *, delete_on_exit: bool) -> None:
+    def __init__(
+        self,
+        manager: "DaimonManagerClient",
+        *,
+        delete_on_exit: bool,
+        network_policy: NetworkPolicy | dict[str, Any] | None = None,
+    ) -> None:
         self._manager = manager
         self._delete_on_exit = delete_on_exit
+        self._network_policy = network_policy
         self._sandbox: DaimonSandbox | None = None
 
     async def __aenter__(self) -> DaimonSandbox:
-        self._sandbox = await self._manager.create_sandbox()
+        self._sandbox = await self._manager.create_sandbox(network_policy=self._network_policy)
         return await self._sandbox.connect()
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -238,8 +256,18 @@ class DaimonManagerClient:
     def _sandbox_info(self, payload: dict[str, Any]) -> SandboxInfo:
         return SandboxInfo.from_dict(payload, base_url=self.base_url)
 
-    async def create_sandbox(self) -> DaimonSandbox:
-        info = self._sandbox_info(await self._transport.json("POST", "/sandboxes"))
+    async def create_sandbox(
+        self,
+        *,
+        network_policy: NetworkPolicy | dict[str, Any] | None = None,
+    ) -> DaimonSandbox:
+        body: dict[str, Any] = {}
+        policy_body = _network_policy_body(network_policy)
+        if policy_body is not None:
+            body["network_policy"] = policy_body
+        info = self._sandbox_info(
+            await self._transport.json("POST", "/sandboxes", body=body or None)
+        )
         return DaimonSandbox(self, info, timeout_s=self.timeout_s)
 
     async def list_sandboxes(
@@ -268,10 +296,16 @@ class DaimonManagerClient:
         *,
         labels: dict[str, str],
         ttl_seconds: int | None = None,
+        network_policy: NetworkPolicy | dict[str, Any] | None = None,
     ) -> DaimonSandbox:
         body: dict[str, Any] = {"labels": labels}
         if ttl_seconds is not None:
             body["ttl_seconds"] = ttl_seconds
+        policy_body = _network_policy_body(network_policy)
+        if policy_body is not None:
+            # The manager refuses to reuse a sandbox whose effective policy
+            # differs; a mismatch surfaces as DaimonHttpError(400).
+            body["network_policy"] = policy_body
         info = self._sandbox_info(
             await self._transport.json("POST", "/sandboxes/find-or-create", body=body)
         )
@@ -321,5 +355,14 @@ class DaimonManagerClient:
             await self._transport.json("PATCH", f"/sandboxes/{sandbox_id}", body=body or None)
         )
 
-    def sandbox(self, *, delete_on_exit: bool = True) -> SandboxContext:
-        return SandboxContext(self, delete_on_exit=delete_on_exit)
+    def sandbox(
+        self,
+        *,
+        delete_on_exit: bool = True,
+        network_policy: NetworkPolicy | dict[str, Any] | None = None,
+    ) -> SandboxContext:
+        return SandboxContext(
+            self,
+            delete_on_exit=delete_on_exit,
+            network_policy=network_policy,
+        )
