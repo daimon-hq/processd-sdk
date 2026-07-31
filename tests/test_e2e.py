@@ -20,6 +20,7 @@ from daimon_sdk import (
     DaimonToolError,
     NetworkPolicy,
     SandboxAction,
+    SecretRule,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -359,21 +360,20 @@ async def test_docker_manager_admission_429_payload_is_preserved() -> None:
     reason="set PROCESSD_SDK_MANAGER_E2E=1 to run Docker manager SDK E2E",
 )
 @pytest.mark.asyncio
-async def test_docker_manager_sandbox_egress_whitelist(docker_manager_url: str) -> None:
+async def test_docker_manager_sandbox_egress_proxy(docker_manager_url: str) -> None:
     async with DaimonManagerClient(docker_manager_url) as manager:
-        # The e2e host may resolve every domain into a fake-IP range (e.g. a
-        # VPN's 198.18.0.0/15 fake-ip answers), which the proxy's SSRF guard
-        # rejects by design. Here we only need the end-to-end allow path, so
-        # relax the guard.
-        policy = NetworkPolicy.whitelist(["example.com"], allow_private_ips=True)
+        # Pure-list semantics: the proxy dials whatever an allowed hostname
+        # resolves to without filtering, so hosts whose resolver answers with
+        # fake-IP ranges (e.g. a VPN's 198.18.0.0/15) work with no extra knob.
+        policy = NetworkPolicy.proxy(["example.com"])
         sandbox = await manager.create_sandbox(network_policy=policy)
         try:
             echoed = sandbox.info.network_policy
             assert echoed is not None
-            assert echoed.mode == "whitelist"
-            assert echoed.allow_domains == ["example.com"]
-            assert echoed.allow_ports == [80, 443]
-            assert echoed.allow_private_ips is True
+            assert echoed.mode == "proxy"
+            assert echoed.allow == ["example.com"]
+            # No allow_ports restriction: every port is tunneled.
+            assert echoed.allow_ports is None
 
             await sandbox.connect()
 
@@ -386,14 +386,14 @@ async def test_docker_manager_sandbox_egress_whitelist(docker_manager_url: str) 
             assert "http://127.0.0.1:" in env.stdout
             assert "localhost,127.0.0.1,::1" in env.stdout
 
-            # A whitelisted domain is tunneled through the proxy.
+            # An allow-listed domain is tunneled through the proxy.
             allowed = await sandbox.exec.bash(
                 "curl -sS -o /dev/null -w '%{http_code}' --max-time 30 https://example.com",
                 timeout_ms=60_000,
             )
             assert "200" in allowed.stdout
 
-            # A non-whitelisted domain is denied: curl reports the CONNECT 403
+            # A non-listed domain is denied: curl reports the CONNECT 403
             # and the transfer itself yields http_code 000.
             denied = await sandbox.exec.bash(
                 "curl -sS -o /dev/null -w '%{http_code}' --max-time 30 https://www.iana.org 2>&1",
@@ -403,7 +403,7 @@ async def test_docker_manager_sandbox_egress_whitelist(docker_manager_url: str) 
             assert "403" in denied_out
             assert "200" not in denied_out
 
-            # Bypassing the proxy is impossible: whitelist mode runs pasta
+            # Bypassing the proxy is impossible: proxy mode runs pasta
             # splice-only, so the sandbox has no interface, route, or DNS and
             # direct connections fail fast.
             direct = await sandbox.exec.bash(
@@ -417,10 +417,10 @@ async def test_docker_manager_sandbox_egress_whitelist(docker_manager_url: str) 
         finally:
             await sandbox.delete()
 
-        # An empty allow_domains list blocks all egress, while inbound
+        # An empty allow list blocks all egress, while inbound
         # manager->sandbox MCP keeps working (the bash call itself succeeds).
         blocked_id = None
-        async with manager.sandbox(network_policy=NetworkPolicy.whitelist([])) as blocked:
+        async with manager.sandbox(network_policy=NetworkPolicy.proxy([])) as blocked:
             blocked_id = blocked.id
             result = await blocked.exec.bash(
                 "curl -sS -o /dev/null -w '%{http_code}' --max-time 15 https://example.com 2>&1",
@@ -444,14 +444,14 @@ async def test_docker_manager_sandbox_egress_whitelist(docker_manager_url: str) 
 async def test_docker_manager_find_or_create_network_policy_mismatch(docker_manager_url: str) -> None:
     async with DaimonManagerClient(docker_manager_url) as manager:
         labels = {"sdk-e2e": "network-policy"}
-        policy = NetworkPolicy.whitelist(["example.com"])
+        policy = NetworkPolicy.proxy(["example.com"])
         sandbox = await manager.find_or_create_sandbox(labels=labels, network_policy=policy)
         try:
             assert sandbox.info.action == SandboxAction.CREATED
 
             # An equivalent policy reuses the sandbox (duplicates are
             # canonicalized away by the manager).
-            equivalent = NetworkPolicy.whitelist(["example.com", "example.com"])
+            equivalent = NetworkPolicy.proxy(["example.com", "example.com"])
             reused = await manager.find_or_create_sandbox(labels=labels, network_policy=equivalent)
             assert reused.info.action == SandboxAction.REUSED
             assert reused.id == sandbox.id
@@ -461,8 +461,91 @@ async def test_docker_manager_find_or_create_network_policy_mismatch(docker_mana
             with pytest.raises(DaimonHttpError) as exc_info:
                 await manager.find_or_create_sandbox(
                     labels=labels,
-                    network_policy=NetworkPolicy.full(),
+                    network_policy=NetworkPolicy.allow_all(),
                 )
             assert exc_info.value.status_code == 400
+        finally:
+            await sandbox.delete()
+
+
+@pytest.mark.manager_e2e
+@pytest.mark.skipif(
+    not MANAGER_E2E_ENABLED,
+    reason="set PROCESSD_SDK_MANAGER_E2E=1 to run Docker manager SDK E2E",
+)
+@pytest.mark.asyncio
+async def test_docker_manager_sandbox_secret_substitution(docker_manager_url: str) -> None:
+    async with DaimonManagerClient(docker_manager_url) as manager:
+        policy = NetworkPolicy.proxy(
+            ["httpbin.org", "example.com"],
+            secrets={
+                "SDK_TEST_KEY": SecretRule(
+                    value="sdk-real-secret",
+                    allowed_hosts=["httpbin.org"],
+                ),
+                # Substituted only on example.com, so httpbin must see this
+                # one's placeholder verbatim.
+                "SDK_OTHER_KEY": SecretRule(
+                    value="sdk-other-secret",
+                    allowed_hosts=["example.com"],
+                ),
+            },
+        )
+        sandbox = await manager.create_sandbox(network_policy=policy)
+        try:
+            echoed = sandbox.info.network_policy
+            assert echoed is not None
+            # The API redacts the secret value but echoes the placeholder.
+            rule = echoed.secrets["SDK_TEST_KEY"]
+            assert rule.value == "***"
+            assert rule.placeholder is not None
+            assert rule.placeholder.startswith("pdm-vlt-")
+
+            await sandbox.connect()
+
+            # The jail env carries only the placeholder, never the value.
+            env = await sandbox.exec.bash(
+                "printf '%s' \"$SDK_TEST_KEY\"", timeout_ms=30_000
+            )
+            assert env.stdout.startswith("pdm-vlt-")
+            assert "sdk-real-secret" not in env.stdout
+
+            # Header substitution against an allowed host: httpbin echoes the
+            # real value the proxy injected.
+            headers = await sandbox.exec.bash(
+                "curl -sS --max-time 30 -H \"Authorization: Bearer $SDK_TEST_KEY\""
+                " https://httpbin.org/headers",
+                timeout_ms=60_000,
+            )
+            assert "sdk-real-secret" in headers.stdout
+            assert "pdm-vlt-" not in headers.stdout
+
+            # Body substitution against the same host.
+            body = await sandbox.exec.bash(
+                "curl -sS --max-time 30 -X POST -d '{\"key\":\"'$SDK_TEST_KEY'\"}'"
+                " https://httpbin.org/post",
+                timeout_ms=60_000,
+            )
+            assert "sdk-real-secret" in body.stdout
+
+            # A host NOT in a secret's allowed_hosts receives the placeholder
+            # verbatim — httpbin echoes it back unsubstituted.
+            passthrough = await sandbox.exec.bash(
+                "curl -sS --max-time 30 -H \"X-Other: $SDK_OTHER_KEY\""
+                " https://httpbin.org/headers",
+                timeout_ms=60_000,
+            )
+            assert "pdm-vlt-" in passthrough.stdout
+            assert "sdk-other-secret" not in passthrough.stdout
+
+            # Non-allowed hosts stay reachable (the placeholder is useless
+            # without the proxy's mapping, so this is safe by design).
+            other = await sandbox.exec.bash(
+                "curl -sS --max-time 30 -H \"X-Key: $SDK_TEST_KEY\""
+                " -o /dev/null -w '%{http_code}' https://example.com; echo rc=$?",
+                timeout_ms=60_000,
+            )
+            assert "200" in other.stdout
+            assert "rc=0" in other.stdout
         finally:
             await sandbox.delete()

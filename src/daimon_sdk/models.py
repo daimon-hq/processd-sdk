@@ -7,8 +7,43 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
+from .exceptions import DaimonProtocolError
+
 if TYPE_CHECKING:
     from .client import DaimonClient
+
+
+_MISSING: Any = object()
+
+
+def _str_list_field(payload: dict[str, Any], key: str, context: str) -> list[str]:
+    """Reads a required-to-be-list-of-strings field, rejecting coercion-prone
+    shapes (a bare string would silently explode into per-character entries).
+
+    A missing key reads as the empty list; an explicit ``null`` is malformed
+    (the manager's serde defaults only apply to omitted fields) and raises."""
+    raw = payload.get(key, _MISSING)
+    if raw is _MISSING:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        raise DaimonProtocolError(
+            f"{context}.{key} must be a list of strings, got {type(raw).__name__}"
+        )
+    return [str(item) for item in raw]
+
+
+def _bool_field(payload: dict[str, Any], key: str, default: bool, context: str) -> bool:
+    """Reads a boolean field, rejecting truthy/falsy non-booleans like the
+    string "false" (which ``bool()`` would read as True). A missing key reads
+    as ``default``; an explicit ``null`` is malformed and raises."""
+    raw = payload.get(key, _MISSING)
+    if raw is _MISSING:
+        return default
+    if not isinstance(raw, bool):
+        raise DaimonProtocolError(
+            f"{context}.{key} must be a boolean, got {type(raw).__name__}"
+        )
+    return raw
 
 
 @dataclass(slots=True)
@@ -167,47 +202,134 @@ class ServicePortInfo:
 
 
 @dataclass(slots=True)
+class SecretRule:
+    """Vault-style secret substitution rule, mirroring the manager's
+    ``network_policy.secrets`` entries.
+
+    The manager generates an opaque ``placeholder`` (``pdm-vlt-<hex>``) at
+    creation; the jail environment variable named by the secrets-map key
+    carries only that placeholder. The egress proxy substitutes the real
+    ``value`` into outbound requests whose target matches ``allowed_hosts``
+    (exact domains, ``*.`` suffix wildcards, or ``*``), in request header
+    values (``header``) and/or the request body (``body``). The real value
+    never enters the sandbox; API responses redact it to ``"***"``.
+
+    A rule parsed from an API response (``redacted``) cannot be re-sent:
+    ``to_dict`` raises rather than silently re-creating a sandbox whose
+    secret is the literal redaction marker.
+    """
+
+    value: str
+    allowed_hosts: list[str]
+    header: bool = True
+    body: bool = True
+    placeholder: str | None = None
+    redacted: bool = False
+    raw_payload: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SecretRule":
+        payload = dict(payload)
+        placeholder = payload.get("placeholder")
+        if placeholder is not None and not isinstance(placeholder, str):
+            raise DaimonProtocolError(
+                "network_policy.secrets placeholder must be a string, "
+                f"got {type(placeholder).__name__}"
+            )
+        value = payload.get("value", _MISSING)
+        if value is _MISSING:
+            value = ""
+        if not isinstance(value, str):
+            raise DaimonProtocolError(
+                f"network_policy.secrets value must be a string, got {type(value).__name__}"
+            )
+        return cls(
+            value=value,
+            allowed_hosts=_str_list_field(payload, "allowed_hosts", "network_policy.secrets"),
+            header=_bool_field(payload, "header", True, "network_policy.secrets"),
+            body=_bool_field(payload, "body", True, "network_policy.secrets"),
+            placeholder=None if placeholder in (None, "") else placeholder,
+            redacted=value == "***",
+            raw_payload=payload,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.redacted:
+            raise ValueError(
+                "this SecretRule was parsed from an API response with a redacted "
+                'value ("***"); supply the real secret value before re-using it '
+                "in a create request"
+            )
+        # The placeholder is generated server-side; callers never send one.
+        return {
+            "value": self.value,
+            "allowed_hosts": list(self.allowed_hosts),
+            "header": self.header,
+            "body": self.body,
+        }
+
+
+@dataclass(slots=True)
 class NetworkPolicy:
     """Per-sandbox egress policy, mirroring the manager's ``network_policy``.
 
-    ``full`` (the manager default) leaves networking unrestricted.
-    ``whitelist`` blocks all direct egress; sandbox processes can only reach
-    the whitelisted domains through the manager's per-sandbox CONNECT proxy
-    (an empty ``allow_domains`` blocks all egress).
+    ``proxy`` (the manager default) blocks all direct egress; sandbox
+    processes can only reach allow-listed targets through the manager's
+    per-sandbox CONNECT proxy (an empty ``allow`` blocks all egress,
+    ``["*"]`` allows everything). ``legacy_nat`` is the deprecated direct
+    NAT+DNS mode with no egress control; its remaining fields are ignored by
+    the manager.
+
+    ``allow`` entries are exact hosts, ``*.`` suffix wildcards, literal IPs,
+    CIDR ranges, or ``*``. The proxy dials whatever an allowed hostname
+    resolves to — resolution results are NOT checked, so private/reserved
+    address space is reachable by listing it explicitly OR by listing a
+    hostname that resolves there; choose wildcard entries with care
+    (pure-list semantics).
     """
 
-    FULL = "full"
-    WHITELIST = "whitelist"
+    PROXY = "proxy"
+    LEGACY_NAT = "legacy_nat"
 
     mode: str
-    allow_domains: list[str]
+    allow: list[str]
     allow_ports: list[int] | None
-    allow_private_ips: bool | None
+    secrets: dict[str, SecretRule]
     raw_payload: dict[str, Any]
 
     @classmethod
-    def full(cls) -> "NetworkPolicy":
+    def allow_all(cls) -> "NetworkPolicy":
         return cls(
-            mode=cls.FULL,
-            allow_domains=[],
+            mode=cls.PROXY,
+            allow=["*"],
             allow_ports=None,
-            allow_private_ips=None,
+            secrets={},
             raw_payload={},
         )
 
     @classmethod
-    def whitelist(
+    def proxy(
         cls,
-        allow_domains: list[str],
+        allow: list[str],
         *,
         allow_ports: list[int] | None = None,
-        allow_private_ips: bool | None = None,
+        secrets: dict[str, SecretRule] | None = None,
     ) -> "NetworkPolicy":
         return cls(
-            mode=cls.WHITELIST,
-            allow_domains=list(allow_domains),
+            mode=cls.PROXY,
+            allow=list(allow),
             allow_ports=list(allow_ports) if allow_ports is not None else None,
-            allow_private_ips=allow_private_ips,
+            secrets=dict(secrets) if secrets is not None else {},
+            raw_payload={},
+        )
+
+    @classmethod
+    def legacy_nat(cls) -> "NetworkPolicy":
+        return cls(
+            mode=cls.LEGACY_NAT,
+            allow=[],
+            allow_ports=None,
+            secrets={},
             raw_payload={},
         )
 
@@ -217,28 +339,59 @@ class NetworkPolicy:
             return None
         payload = dict(payload)
         allow_ports = payload.get("allow_ports")
-        allow_private_ips = payload.get("allow_private_ips")
+        if allow_ports is not None and (
+            not isinstance(allow_ports, list)
+            or not all(isinstance(port, int) and not isinstance(port, bool) for port in allow_ports)
+        ):
+            raise DaimonProtocolError(
+                "network_policy.allow_ports must be a list of integers or null"
+            )
+        secrets_raw = payload.get("secrets", _MISSING)
+        if secrets_raw is _MISSING:
+            secrets_raw = {}
+        if not isinstance(secrets_raw, dict) or not all(
+            isinstance(rule, dict) for rule in secrets_raw.values()
+        ):
+            raise DaimonProtocolError(
+                "network_policy.secrets must be an object of rule objects"
+            )
+        # A missing allow list mirrors the manager's serde default (["*"],
+        # unrestricted) — NOT an empty list, which blocks all egress. An
+        # explicit null is malformed (serde defaults only apply to omitted
+        # fields) and raises inside _str_list_field.
+        allow = (
+            ["*"]
+            if "allow" not in payload
+            else _str_list_field(payload, "allow", "network_policy")
+        )
+        mode = payload.get("mode", cls.PROXY)
+        if not isinstance(mode, str):
+            raise DaimonProtocolError(
+                f"network_policy.mode must be a string, got {type(mode).__name__}"
+            )
         return cls(
-            mode=str(payload.get("mode", "full")),
-            allow_domains=[str(domain) for domain in list(payload.get("allow_domains") or [])],
-            allow_ports=[int(port) for port in list(allow_ports)]
+            mode=mode,
+            allow=allow,
+            allow_ports=[int(port) for port in allow_ports]
             if allow_ports is not None
             else None,
-            allow_private_ips=None if allow_private_ips is None else bool(allow_private_ips),
+            secrets={
+                str(name): SecretRule.from_dict(rule) for name, rule in secrets_raw.items()
+            },
             raw_payload=payload,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        if self.mode == self.FULL:
-            return {"mode": self.FULL}
+        if self.mode == self.LEGACY_NAT:
+            return {"mode": self.LEGACY_NAT}
         body: dict[str, Any] = {
             "mode": self.mode,
-            "allow_domains": list(self.allow_domains),
+            "allow": list(self.allow),
         }
         if self.allow_ports is not None:
             body["allow_ports"] = list(self.allow_ports)
-        if self.allow_private_ips is not None:
-            body["allow_private_ips"] = self.allow_private_ips
+        if self.secrets:
+            body["secrets"] = {name: rule.to_dict() for name, rule in self.secrets.items()}
         return body
 
 

@@ -10,12 +10,39 @@ from .models import ManagerCapacityResult, NetworkPolicy, SandboxInfo, ServicePo
 
 
 def _network_policy_body(policy: NetworkPolicy | dict[str, Any] | None) -> dict[str, Any] | None:
-    """Normalizes a user-supplied policy into a request body fragment."""
+    """Normalizes a user-supplied policy into a request body fragment.
+
+    Dict policies are passed through with two normalizations: server-generated
+    secret ``placeholder`` fields are stripped (the manager generates its own
+    at creation and ignores a caller's), and a rule whose ``value`` is the
+    redaction marker ``"***"`` is rejected. Note that a policy dict copied from
+    an API *response* (e.g. ``info.network_policy.raw_payload``) carries
+    redacted ``"***"`` secret values and must NOT be replayed into a create
+    request — supply the real values instead.
+    """
     if policy is None:
         return None
     if isinstance(policy, NetworkPolicy):
         return policy.to_dict()
-    return dict(policy)
+    body = dict(policy)
+    secrets = body.get("secrets")
+    if isinstance(secrets, dict):
+        cleaned: dict[str, Any] = {}
+        for name, rule in secrets.items():
+            if isinstance(rule, dict):
+                if rule.get("value") == "***":
+                    raise ValueError(
+                        f"network_policy.secrets[{name!r}] carries the redacted "
+                        'value "***" from an API response; supply the real '
+                        "secret value before re-using it in a create request"
+                    )
+                cleaned[name] = {
+                    key: value for key, value in dict(rule).items() if key != "placeholder"
+                }
+            else:
+                cleaned[name] = rule
+        body["secrets"] = cleaned
+    return body
 
 
 class ManagerHTTPTransport:

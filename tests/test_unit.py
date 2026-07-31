@@ -16,6 +16,7 @@ from daimon_sdk.models import (
     NetworkPolicy,
     SandboxAction,
     SandboxInfo,
+    SecretRule,
     SessionHandle,
 )
 
@@ -52,10 +53,18 @@ SANDBOX_PAYLOAD = {
     },
     "sandbox_ip": "10.255.0.2",
     "network_policy": {
-        "mode": "whitelist",
-        "allow_domains": ["example.com"],
+        "mode": "proxy",
+        "allow": ["example.com"],
         "allow_ports": [80, 443],
-        "allow_private_ips": False,
+        "secrets": {
+            "API_KEY": {
+                "placeholder": "pdm-vlt-0123456789abcdef0123456789abcdef",
+                "value": "***",
+                "allowed_hosts": ["api.example.com"],
+                "header": True,
+                "body": False,
+            }
+        },
     },
     "service_ports": [
         {
@@ -248,11 +257,17 @@ def test_manager_models_parse_payloads() -> None:
 
     policy = sandbox.network_policy
     assert policy is not None
-    assert policy.mode == "whitelist"
-    assert policy.allow_domains == ["example.com"]
+    assert policy.mode == "proxy"
+    assert policy.allow == ["example.com"]
     assert policy.allow_ports == [80, 443]
-    assert policy.allow_private_ips is False
-    assert policy.raw_payload["mode"] == "whitelist"
+    assert policy.raw_payload["mode"] == "proxy"
+    # Secrets parse with the redacted value and the echoed placeholder.
+    rule = policy.secrets["API_KEY"]
+    assert rule.value == "***"
+    assert rule.placeholder == "pdm-vlt-0123456789abcdef0123456789abcdef"
+    assert rule.allowed_hosts == ["api.example.com"]
+    assert rule.header is True
+    assert rule.body is False
 
     capacity = ManagerCapacityResult.from_dict(CAPACITY_PAYLOAD)
     assert capacity.mode == "resource"
@@ -268,28 +283,150 @@ def test_sandbox_info_network_policy_defaults_to_none_when_missing() -> None:
 
 
 def test_network_policy_to_dict_shapes() -> None:
-    assert NetworkPolicy.full().to_dict() == {"mode": "full"}
-    # None fields are omitted so the manager applies its defaults.
-    assert NetworkPolicy.whitelist(["example.com"]).to_dict() == {
-        "mode": "whitelist",
-        "allow_domains": ["example.com"],
+    # Allow-all proxy mode (the manager's default networking).
+    assert NetworkPolicy.allow_all().to_dict() == {
+        "mode": "proxy",
+        "allow": ["*"],
     }
-    assert NetworkPolicy.whitelist(
+    # legacy_nat drops all other fields.
+    assert NetworkPolicy.legacy_nat().to_dict() == {"mode": "legacy_nat"}
+    # None fields are omitted so the manager applies its defaults.
+    assert NetworkPolicy.proxy(["example.com"]).to_dict() == {
+        "mode": "proxy",
+        "allow": ["example.com"],
+    }
+    assert NetworkPolicy.proxy(
         ["example.com", "*.rust-lang.org"],
         allow_ports=[443],
-        allow_private_ips=True,
+        secrets={
+            "API_KEY": SecretRule(
+                value="sk-real",
+                allowed_hosts=["api.example.com"],
+                body=False,
+            )
+        },
     ).to_dict() == {
-        "mode": "whitelist",
-        "allow_domains": ["example.com", "*.rust-lang.org"],
+        "mode": "proxy",
+        "allow": ["example.com", "*.rust-lang.org"],
         "allow_ports": [443],
-        "allow_private_ips": True,
+        "secrets": {
+            "API_KEY": {
+                "value": "sk-real",
+                "allowed_hosts": ["api.example.com"],
+                "header": True,
+                "body": False,
+            }
+        },
     }
-    # An empty allow_domains list is meaningful (blocks all egress) and must
-    # be sent explicitly.
-    assert NetworkPolicy.whitelist([]).to_dict() == {
-        "mode": "whitelist",
-        "allow_domains": [],
+    # An empty allow list is meaningful (blocks all egress) and must be sent
+    # explicitly.
+    assert NetworkPolicy.proxy([]).to_dict() == {
+        "mode": "proxy",
+        "allow": [],
     }
+    # The placeholder is generated server-side and never sent by the client.
+    assert "placeholder" not in SecretRule(
+        value="sk-real",
+        allowed_hosts=["api.example.com"],
+        placeholder="pdm-vlt-echo",
+    ).to_dict()
+
+
+def test_secret_rule_redacted_response_cannot_be_reserialized() -> None:
+    # A rule parsed from an API response carries the redacted "***" value;
+    # re-sending it would silently create a sandbox whose secret is the
+    # literal redaction marker.
+    rule = SecretRule.from_dict(
+        {
+            "placeholder": "pdm-vlt-abc",
+            "value": "***",
+            "allowed_hosts": ["api.example.com"],
+            "header": True,
+            "body": True,
+        }
+    )
+    assert rule.redacted is True
+    with pytest.raises(ValueError, match="redacted"):
+        rule.to_dict()
+    policy = NetworkPolicy.from_dict(
+        {
+            "mode": "proxy",
+            "allow": ["api.example.com"],
+            "secrets": {"API_KEY": rule.raw_payload},
+        }
+    )
+    assert policy is not None
+    with pytest.raises(ValueError, match="redacted"):
+        policy.to_dict()
+
+
+def test_network_policy_from_dict_rejects_malformed_types() -> None:
+    # A bare string must not explode into per-character entries.
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": "proxy", "allow": "example.com"})
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": "proxy", "allow_ports": "443"})
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": "proxy", "secrets": {"K": "not-a-dict"}})
+    # Falsy-but-malformed shapes must not slip past validation either.
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": "proxy", "secrets": []})
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict({"value": 0, "allowed_hosts": ["a.example.com"]})
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict({"value": False, "allowed_hosts": ["a.example.com"]})
+    # Truthy strings are not booleans.
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict(
+            {"value": "x", "allowed_hosts": ["a.example.com"], "header": "false"}
+        )
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict(
+            {"value": "x", "allowed_hosts": "a.example.com"}
+        )
+
+
+def test_network_policy_from_dict_missing_allow_defaults_to_allow_all() -> None:
+    # The manager's serde default for an omitted allow list is ["*"]
+    # (unrestricted) — parsing and re-sending must not silently flip it to
+    # block-all.
+    policy = NetworkPolicy.from_dict({"mode": "proxy"})
+    assert policy is not None
+    assert policy.allow == ["*"]
+    assert policy.to_dict() == {"mode": "proxy", "allow": ["*"]}
+
+
+def test_network_policy_from_dict_rejects_explicit_nulls() -> None:
+    # Serde defaults apply only to OMITTED fields; an explicit JSON null is
+    # malformed and must not silently become the default.
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": "proxy", "allow": None})
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": "proxy", "secrets": None})
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict({"value": None, "allowed_hosts": ["a.example.com"]})
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict({"value": "x", "allowed_hosts": None})
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict(
+            {"value": "x", "allowed_hosts": ["a.example.com"], "header": None}
+        )
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict(
+            {"value": "x", "allowed_hosts": ["a.example.com"], "body": None}
+        )
+
+
+def test_network_policy_from_dict_rejects_non_string_scalars() -> None:
+    # mode and placeholder are string fields; str() must not coerce other types.
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": False})
+    with pytest.raises(DaimonProtocolError):
+        NetworkPolicy.from_dict({"mode": 0})
+    with pytest.raises(DaimonProtocolError):
+        SecretRule.from_dict(
+            {"value": "x", "allowed_hosts": ["a.example.com"], "placeholder": False}
+        )
 
 
 def test_sandbox_info_action_defaults_to_none_when_missing() -> None:
@@ -363,7 +500,7 @@ async def test_create_sandbox_sends_no_body_without_policy() -> None:
         assert server.captured_requests == [("/sandboxes", b"")]
         # The response policy is parsed onto the sandbox info.
         assert sandbox.info.network_policy is not None
-        assert sandbox.info.network_policy.mode == "whitelist"
+        assert sandbox.info.network_policy.mode == "proxy"
     finally:
         server.shutdown()
         server.server_close()
@@ -376,14 +513,14 @@ async def test_create_sandbox_sends_network_policy_body() -> None:
     try:
         manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
         await manager.create_sandbox(
-            network_policy=NetworkPolicy.whitelist(["example.com"], allow_ports=[443])
+            network_policy=NetworkPolicy.proxy(["example.com"], allow_ports=[443])
         )
         path, body = server.captured_requests[0]
         assert path == "/sandboxes"
         assert json.loads(body) == {
             "network_policy": {
-                "mode": "whitelist",
-                "allow_domains": ["example.com"],
+                "mode": "proxy",
+                "allow": ["example.com"],
                 "allow_ports": [443],
             }
         }
@@ -398,11 +535,70 @@ async def test_create_sandbox_accepts_dict_policy() -> None:
     server, thread = _start_capture_server()
     try:
         manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        await manager.create_sandbox(network_policy={"mode": "proxy", "allow": []})
+        _, body = server.captured_requests[0]
+        assert json.loads(body) == {"network_policy": {"mode": "proxy", "allow": []}}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_strips_placeholders_from_dict_policy() -> None:
+    server, thread = _start_capture_server()
+    try:
+        manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        # A response-shaped policy dict (e.g. copied from raw_payload) carries
+        # server-generated placeholders; they must never be re-sent.
         await manager.create_sandbox(
-            network_policy={"mode": "whitelist", "allow_domains": []}
+            network_policy={
+                "mode": "proxy",
+                "allow": ["api.example.com"],
+                "secrets": {
+                    "API_KEY": {
+                        "placeholder": "pdm-vlt-abc",
+                        "value": "sk-real",
+                        "allowed_hosts": ["api.example.com"],
+                        "header": True,
+                        "body": True,
+                    }
+                },
+            }
         )
         _, body = server.captured_requests[0]
-        assert json.loads(body) == {"network_policy": {"mode": "whitelist", "allow_domains": []}}
+        sent = json.loads(body)["network_policy"]["secrets"]["API_KEY"]
+        assert "placeholder" not in sent
+        assert sent["value"] == "sk-real"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_rejects_redacted_value_in_dict_policy() -> None:
+    server, thread = _start_capture_server()
+    try:
+        manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
+        # A policy dict copied from an API response carries redacted "***"
+        # values; replaying it would silently set the real secret to the
+        # redaction marker, so it must be rejected client-side.
+        with pytest.raises(ValueError, match="redacted"):
+            await manager.create_sandbox(
+                network_policy={
+                    "mode": "proxy",
+                    "allow": ["api.example.com"],
+                    "secrets": {
+                        "API_KEY": {
+                            "placeholder": "pdm-vlt-abc",
+                            "value": "***",
+                            "allowed_hosts": ["api.example.com"],
+                        }
+                    },
+                }
+            )
+        assert server.captured_requests == []
     finally:
         server.shutdown()
         server.server_close()
@@ -416,13 +612,13 @@ async def test_find_or_create_sandbox_includes_network_policy() -> None:
         manager = DaimonManagerClient(f"http://127.0.0.1:{server.server_address[1]}")
         await manager.find_or_create_sandbox(
             labels={"thread_id": "thread-a"},
-            network_policy=NetworkPolicy.whitelist(["example.com"]),
+            network_policy=NetworkPolicy.proxy(["example.com"]),
         )
         path, body = server.captured_requests[0]
         assert path == "/sandboxes/find-or-create"
         assert json.loads(body) == {
             "labels": {"thread_id": "thread-a"},
-            "network_policy": {"mode": "whitelist", "allow_domains": ["example.com"]},
+            "network_policy": {"mode": "proxy", "allow": ["example.com"]},
         }
     finally:
         server.shutdown()
