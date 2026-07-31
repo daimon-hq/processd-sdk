@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "daimon-sdk"
-version = "0.5.1"
+version = "0.5.2"
 description = "Typed async Python SDK for daimon MCP services."
 readme = "README.md"
 requires-python = ">=3.12"
