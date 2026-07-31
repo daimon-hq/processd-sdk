@@ -5,7 +5,7 @@ from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from ._transport import FastMCPTransportAdapter, ToolCallEnvelope
+from ._transport import _USE_DEFAULT_TIMEOUT, FastMCPTransportAdapter, ToolCallEnvelope
 from .models import (
     BashResult,
     ContentBlock,
@@ -323,7 +323,19 @@ class ExecAPI:
         description: str | None = None,
         run_in_background: bool = False,
         dangerously_disable_sandbox: bool = False,
+        transport_timeout_s: Any = _USE_DEFAULT_TIMEOUT,
     ) -> BashResult:
+        """Run a shell command via the Bash tool.
+
+        Args:
+            timeout_ms: Server-side command timeout in milliseconds. ``None``
+                omits it (server default applies).
+            transport_timeout_s: Client-side per-call read timeout in seconds.
+                Defaults to the client's configured ``timeout_s``. Pass an
+                explicit value that covers a large ``timeout_ms`` so the
+                transport does not time out before the server; pass ``None``
+                for an unbounded wait (pairs with ``timeout_ms=None``).
+        """
         arguments: dict[str, Any] = {
             "command": command,
             "run_in_background": run_in_background,
@@ -333,7 +345,11 @@ class ExecAPI:
             arguments["timeout"] = timeout_ms
         if description is not None:
             arguments["description"] = description
-        envelope = await self._client._call_tool("Bash", arguments)
+        envelope = await self._client._call_tool(
+            "Bash",
+            arguments,
+            timeout=transport_timeout_s,
+        )
         payload = envelope.payload
         return BashResult(
             stdout=payload["stdout"],
@@ -531,9 +547,11 @@ class DaimonClient:
         arguments: dict[str, Any],
         *,
         raise_on_error: bool = True,
+        timeout: Any = _USE_DEFAULT_TIMEOUT,
     ) -> ToolCallEnvelope:
         return await self._transport.call_tool(
             tool_name,
             arguments,
             raise_on_error=raise_on_error,
+            timeout=timeout,
         )

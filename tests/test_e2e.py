@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from daimon_sdk import (
+    DaimonClient,
     DaimonConnectionError,
     DaimonHttpError,
     DaimonManagerClient,
@@ -210,6 +211,44 @@ async def test_web_fetch_and_bash(client) -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_bash_per_call_transport_timeout_overrides_default(unauth_server) -> None:
+    """A command longer than the configured default must survive a larger override.
+
+    With the client default read timeout set short, a command that outlasts it
+    is cut off by the transport; passing a per-call ``transport_timeout_s``
+    that covers the command lets it run to completion. This exercises the real
+    MCP transport, not a stubbed exec API.
+    """
+    sleep_s = 3
+    command = f"sleep {sleep_s}; echo done"
+    # Server-side timeout is generous so only the client transport bounds the wait.
+    timeout_ms = (sleep_s + 30) * 1000
+
+    # Without an override, the short configured default caps the read.
+    async with DaimonClient(unauth_server.mcp_url, timeout_s=1.0) as client:
+        with pytest.raises(DaimonConnectionError):
+            await client.exec.bash(command, timeout_ms=timeout_ms)
+
+    # A per-call transport timeout that covers the command lets it complete.
+    async with DaimonClient(unauth_server.mcp_url, timeout_s=1.0) as client:
+        result = await client.exec.bash(
+            command,
+            timeout_ms=timeout_ms,
+            transport_timeout_s=float(sleep_s + 30),
+        )
+        assert "done" in result.stdout
+
+    # transport_timeout_s=None is an unbounded read, not the configured default.
+    async with DaimonClient(unauth_server.mcp_url, timeout_s=1.0) as client:
+        result = await client.exec.bash(
+            command,
+            timeout_ms=timeout_ms,
+            transport_timeout_s=None,
+        )
+        assert "done" in result.stdout
 
 
 @pytest.mark.asyncio

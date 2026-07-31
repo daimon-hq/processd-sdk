@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import threading
+import asyncio
 import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import httpx
 import pytest
 
 from daimon_sdk import DaimonClient
-from daimon_sdk._transport import ToolCallEnvelope, content_blocks_display_text, decode_tool_result
-from daimon_sdk.exceptions import DaimonHttpError, DaimonProtocolError
+from daimon_sdk._transport import (
+    _USE_DEFAULT_TIMEOUT,
+    FastMCPTransportAdapter,
+    ToolCallEnvelope,
+    _consume_connect_exception,
+    content_blocks_display_text,
+    decode_tool_result,
+)
+from daimon_sdk.exceptions import DaimonConnectionError, DaimonHttpError, DaimonProtocolError
 from daimon_sdk.manager import DaimonManagerClient, DaimonSandbox, ManagerHTTPTransport
 from daimon_sdk.models import (
     ExecResult,
@@ -885,3 +894,291 @@ async def test_manager_sandbox_context_can_leave_sandbox_running(monkeypatch) ->
     async with manager.sandbox(delete_on_exit=False):
         pass
     assert calls == ["connect", "close"]
+
+
+@pytest.mark.asyncio
+async def test_transport_call_tool_threads_per_call_timeout(monkeypatch) -> None:
+    """call_tool must forward the per-call read timeout to the FastMCP client.
+
+    Default falls back to the configured timeout_s; an explicit float overrides
+    it; an explicit None requests an unbounded read.
+    """
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    seen: list[object] = []
+
+    class FakeFastMCPClient:
+        async def call_tool(self, name, arguments, *, raise_on_error, timeout):
+            seen.append(timeout)
+            return DummyResult(structured_content={"ok": True})
+
+    async def fake_connect(self) -> None:
+        adapter._client = FakeFastMCPClient()  # type: ignore[assignment]
+
+    monkeypatch.setattr(FastMCPTransportAdapter, "connect", fake_connect)
+
+    await adapter.call_tool("Bash", {})
+    assert seen[-1] == 10.0
+
+    await adapter.call_tool("Bash", {}, timeout=305.0)
+    assert seen[-1] == 305.0
+
+    await adapter.call_tool("Bash", {}, timeout=None)
+    assert seen[-1] is None
+
+
+def test_httpx_factory_leaves_read_unbounded_for_tool_calls() -> None:
+    """Tool-call HTTP reads are bounded by the MCP session timeout, not httpx."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    client = adapter._httpx_client_factory()
+    assert client.timeout.read is None
+    assert client.timeout.connect == 10.0
+    assert client.timeout.write == 10.0
+    assert client.timeout.pool == 10.0
+
+
+def test_httpx_factory_respects_explicit_bounded_timeout() -> None:
+    """Direct request/stream helpers pass an explicit bounded timeout."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    client = adapter._httpx_client_factory(timeout=httpx.Timeout(10.0))
+    assert client.timeout.read == 10.0
+    assert client.timeout.connect == 10.0
+
+
+@pytest.mark.asyncio
+async def test_bash_threads_transport_timeout_to_call_tool() -> None:
+    client = DaimonClient("http://127.0.0.1:19000/mcp", timeout_s=10.0)
+    seen: list[object] = []
+
+    async def fake_call_tool(name, arguments, *, raise_on_error=True, timeout=_USE_DEFAULT_TIMEOUT):
+        seen.append(timeout)
+        return ToolCallEnvelope(
+            tool_name=name,
+            payload={
+                "stdout": "ok",
+                "stderr": "",
+                "interrupted": False,
+                "dangerouslyDisableSandbox": False,
+            },
+            content_blocks=[],
+            display_text="",
+            raw_result=None,
+        )
+
+    client._call_tool = fake_call_tool  # type: ignore[method-assign]
+
+    await client.exec.bash("make build", timeout_ms=300000, transport_timeout_s=305.0)
+    assert seen[-1] == 305.0
+
+    await client.exec.bash("long-job", timeout_ms=None, transport_timeout_s=None)
+    assert seen[-1] is None
+
+    await client.exec.bash("pwd")
+    assert seen[-1] is _USE_DEFAULT_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_concurrent_connect_builds_single_client(monkeypatch) -> None:
+    """Concurrent first connects must not each build (and leak) a client."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    built: list[object] = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            # Yield so a lockless connect would interleave a second build here.
+            await asyncio.sleep(0.05)
+            return self
+
+    def fake_client_ctor(transport, init_timeout=None):
+        client = FakeClient()
+        built.append(client)
+        return client
+
+    monkeypatch.setattr("daimon_sdk._transport.Client", fake_client_ctor)
+
+    await asyncio.gather(adapter.connect(), adapter.connect(), adapter.connect())
+    assert len(built) == 1
+    assert adapter._client is built[0]
+
+
+@pytest.mark.asyncio
+async def test_connect_timeout_error_is_descriptive(monkeypatch) -> None:
+    """A stalled connect must surface a real message, not an empty TimeoutError."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=0.05)
+
+    class FakeClient:
+        async def __aenter__(self):
+            await asyncio.sleep(10)  # stall past the connect cap
+            return self
+
+    monkeypatch.setattr("daimon_sdk._transport.Client", lambda *a, **k: FakeClient())
+
+    with pytest.raises(DaimonConnectionError) as excinfo:
+        await adapter.connect()
+    assert "did not complete within" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failed_connects_share_single_attempt(monkeypatch) -> None:
+    """Concurrent failed cold connects share one attempt, not cumulative retries."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=0.05)
+    attempts: list[int] = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            attempts.append(1)
+            await asyncio.sleep(10)  # stall until the connect cap cancels
+            return self
+
+    monkeypatch.setattr("daimon_sdk._transport.Client", lambda *a, **k: FakeClient())
+
+    results = await asyncio.gather(
+        adapter.connect(), adapter.connect(), adapter.connect(), return_exceptions=True
+    )
+    assert len(attempts) == 1
+    assert all(isinstance(r, DaimonConnectionError) for r in results)
+    # A later caller after the shared failure retries with a fresh attempt.
+    with pytest.raises(DaimonConnectionError):
+        await adapter.connect()
+    assert len(attempts) == 2
+
+
+@pytest.mark.asyncio
+async def test_connect_waiter_cancellation_does_not_cancel_shared_attempt(monkeypatch) -> None:
+    """One waiter's cancellation must not cancel the shared connect for others."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    built: list[object] = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            await asyncio.sleep(0.05)
+            return self
+
+    def fake_client_ctor(transport, init_timeout=None):
+        client = FakeClient()
+        built.append(client)
+        return client
+
+    monkeypatch.setattr("daimon_sdk._transport.Client", fake_client_ctor)
+
+    waiter_a = asyncio.ensure_future(adapter.connect())
+    waiter_b = asyncio.ensure_future(adapter.connect())
+    await asyncio.sleep(0.01)  # let both register on the shared connect task
+    waiter_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter_a
+    # B still completes and the single shared client is established.
+    await waiter_b
+    assert len(built) == 1
+    assert adapter._client is built[0]
+
+
+@pytest.mark.asyncio
+async def test_concurrent_close_shares_single_teardown() -> None:
+    """Concurrent closers share one teardown; a later close waits for it."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    exits: list[int] = []
+
+    class FakeClient:
+        async def __aexit__(self, *args):
+            await asyncio.sleep(0.05)  # slow teardown so a second close could interleave
+            exits.append(1)
+
+    adapter._client = FakeClient()  # type: ignore[assignment]
+
+    await asyncio.gather(adapter.close(), adapter.close(), adapter.close())
+    assert len(exits) == 1
+    assert adapter._client is None
+
+    # A subsequent close is a no-op.
+    await adapter.close()
+    assert len(exits) == 1
+
+
+@pytest.mark.asyncio
+async def test_connect_waits_for_in_progress_close(monkeypatch) -> None:
+    """A connect during a close must wait for teardown, then connect fresh."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=10.0)
+    exits: list[int] = []
+    built: list[object] = []
+
+    class OldClient:
+        async def __aexit__(self, *args):
+            await asyncio.sleep(0.05)  # slow teardown; connect must not slip in mid-way
+            exits.append(1)
+
+    class NewClient:
+        async def __aenter__(self):
+            built.append(self)
+            return self
+
+    monkeypatch.setattr("daimon_sdk._transport.Client", lambda *a, **k: NewClient())
+    adapter._client = OldClient()  # type: ignore[assignment]
+
+    close_future = asyncio.ensure_future(adapter.close())
+    await asyncio.sleep(0.01)  # let close() acquire the lock and begin teardown
+    await adapter.connect()  # blocks until teardown finishes, then connects fresh
+    await close_future
+
+    assert len(exits) == 1  # old client torn down exactly once
+    assert len(built) == 1  # exactly one new connection, created after the close
+    assert adapter._client is built[0]
+
+
+@pytest.mark.asyncio
+async def test_consume_connect_exception_marks_failure_retrieved() -> None:
+    """The done callback consumes a failed attempt; it ignores cancelled tasks."""
+    from daimon_sdk.exceptions import DaimonConnectionError as _DCE
+
+    async def fail() -> None:
+        raise _DCE("boom")
+
+    failed = asyncio.ensure_future(fail())
+    await asyncio.sleep(0.01)
+    _consume_connect_exception(failed)
+    # Retrieving again is safe because the callback already consumed it.
+    assert isinstance(failed.exception(), _DCE)
+
+    async def hang() -> None:
+        await asyncio.sleep(10)
+
+    cancelled = asyncio.ensure_future(hang())
+    cancelled.cancel()
+    await asyncio.sleep(0.01)
+    _consume_connect_exception(cancelled)  # must not raise on a cancelled task
+    assert cancelled.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_connect_attaches_done_callback_consuming_exception(monkeypatch) -> None:
+    """connect() must attach the consuming callback so a failed attempt with no
+    surviving waiter is still marked retrieved (no "never retrieved" warning)."""
+    adapter = FastMCPTransportAdapter("http://127.0.0.1:19000/mcp", access_token=None, timeout_s=0.05)
+
+    class FakeClient:
+        async def __aenter__(self):
+            await asyncio.sleep(10)  # stall until the connect cap cancels it
+            return self
+
+    monkeypatch.setattr("daimon_sdk._transport.Client", lambda *a, **k: FakeClient())
+
+    consumed: list[object] = []
+    original = _consume_connect_exception
+
+    def spy(task):
+        consumed.append(task)
+        original(task)
+
+    monkeypatch.setattr("daimon_sdk._transport._consume_connect_exception", spy)
+
+    waiter = asyncio.ensure_future(adapter.connect())
+    await asyncio.sleep(0.01)  # let the shared attempt start
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+
+    task = adapter._connect_task
+    await asyncio.sleep(0.2)  # let the shared attempt fail and the callback fire
+    assert task is not None and task.done()
+    # Independent proof the callback was attached AND fired for this task.
+    assert task in consumed
+    assert isinstance(task.exception(), DaimonConnectionError)
