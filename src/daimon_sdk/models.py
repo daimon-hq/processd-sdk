@@ -210,9 +210,15 @@ class SecretRule:
     creation; the jail environment variable named by the secrets-map key
     carries only that placeholder. The egress proxy substitutes the real
     ``value`` into outbound requests whose target matches ``allowed_hosts``
-    (exact domains, ``*.`` suffix wildcards, or ``*``), in request header
+    (exact domains, ``*.`` suffix wildcards, literal IPs, or ``*``; CIDR
+    ranges are not accepted for secret substitution), in request header
     values (``header``) and/or the request body (``body``). The real value
     never enters the sandbox; API responses redact it to ``"***"``.
+
+    Literal IP ``allowed_hosts`` are intended for **plain HTTP** targets.
+    HTTPS substitution needs a ClientHello SNI; clients connecting to an IP
+    usually omit SNI, and processd refuses ClientHello without SNI. Prefer
+    domain + HTTPS when the secret must be substituted over TLS.
 
     A rule parsed from an API response (``redacted``) cannot be re-sent:
     ``to_dict`` raises rather than silently re-creating a sandbox whose
@@ -427,10 +433,25 @@ class SandboxInfo:
     raw_payload: dict[str, Any]
     action: SandboxAction | None = None
     network_policy: NetworkPolicy | None = None
+    # Guest-facing egress CONNECT proxy (proxy mode only). Host controllers
+    # that build in-sandbox configs (e.g. agentgateway backendTunnel) can use
+    # these without executing a shell in the jail. Both are None when the
+    # manager did not allocate a proxy (legacy_nat or older managers).
+    proxy_port: int | None = None
+    http_proxy: str | None = None
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any], *, base_url: str | None = None) -> "SandboxInfo":
         token = str(payload["token"])
+        proxy_port = _int_or_none(payload.get("proxy_port"))
+        http_proxy = payload.get("http_proxy")
+        if http_proxy is not None and not isinstance(http_proxy, str):
+            raise DaimonProtocolError(
+                f"sandbox http_proxy must be a string or null, got {type(http_proxy).__name__}"
+            )
+        if http_proxy is None and proxy_port is not None:
+            # Older managers may only expose proxy_port; reconstruct the guest URL.
+            http_proxy = f"http://127.0.0.1:{proxy_port}"
         return cls(
             id=str(payload["id"]),
             state=str(payload["state"]),
@@ -450,6 +471,8 @@ class SandboxInfo:
             raw_payload=dict(payload),
             action=_action_or_none(payload.get("action")),
             network_policy=NetworkPolicy.from_dict(payload.get("network_policy")),
+            proxy_port=proxy_port,
+            http_proxy=http_proxy if http_proxy else None,
         )
 
 

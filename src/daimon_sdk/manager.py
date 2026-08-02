@@ -208,6 +208,10 @@ class DaimonSandbox:
             raw_payload=self.info.raw_payload,
             action=self.info.action,
             network_policy=self.info.network_policy,
+            # Manager releases the proxy port on delete; do not advertise a
+            # stale endpoint that may already belong to another sandbox.
+            proxy_port=None,
+            http_proxy=None,
         )
 
     async def __aenter__(self) -> "DaimonSandbox":

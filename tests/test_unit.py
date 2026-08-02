@@ -55,6 +55,8 @@ SANDBOX_PAYLOAD = {
     "ttl_seconds": 3600,
     "expires_at": 3724,
     "action": "reused",
+    "proxy_port": 25806,
+    "http_proxy": "http://127.0.0.1:25806",
     "limits": {
         "rlimit": "applied",
         "cgroup": "applied",
@@ -253,6 +255,8 @@ def test_manager_models_parse_payloads() -> None:
     assert sandbox.action == SandboxAction.REUSED
     assert sandbox.action == "reused"
     assert sandbox.raw_payload["mcp_url"] == SANDBOX_PAYLOAD["mcp_url"]
+    assert sandbox.proxy_port == 25806
+    assert sandbox.http_proxy == "http://127.0.0.1:25806"
     assert len(sandbox.service_ports) == 2
     assert sandbox.service_ports[0].port == 3000
     assert sandbox.service_ports[0].url == (
@@ -277,6 +281,23 @@ def test_manager_models_parse_payloads() -> None:
     assert rule.allowed_hosts == ["api.example.com"]
     assert rule.header is True
     assert rule.body is False
+
+
+def test_sandbox_info_reconstructs_http_proxy_from_proxy_port() -> None:
+    payload = {**SANDBOX_PAYLOAD}
+    del payload["http_proxy"]
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.proxy_port == 25806
+    assert sandbox.http_proxy == "http://127.0.0.1:25806"
+
+
+def test_sandbox_info_missing_proxy_fields_are_none() -> None:
+    payload = {**SANDBOX_PAYLOAD}
+    del payload["proxy_port"]
+    del payload["http_proxy"]
+    sandbox = SandboxInfo.from_dict(payload)
+    assert sandbox.proxy_port is None
+    assert sandbox.http_proxy is None
 
     capacity = ManagerCapacityResult.from_dict(CAPACITY_PAYLOAD)
     assert capacity.mode == "resource"
@@ -716,6 +737,9 @@ async def test_daimon_sandbox_lifecycle_updates_info_and_closes_client() -> None
     assert manager.deleted == "sandbox-1"
     assert replacement_client.closed == 1
     assert sandbox.info.state == "deleted"
+    # delete() rebuilds SandboxInfo locally; released proxy must not be advertised
+    assert sandbox.info.proxy_port is None
+    assert sandbox.info.http_proxy is None
 
     updated = await sandbox.set_ttl(0)
     assert updated.ttl_seconds == 0
